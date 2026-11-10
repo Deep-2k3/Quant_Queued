@@ -1,0 +1,245 @@
+//@version=6
+strategy("Red Box & Black Box Liquidity Trap [Automated V9 - Dynamic SL]", overlay=true, initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=100, max_boxes_count=200, max_labels_count=200)
+
+// =========================================================================
+// 1. INPUTS & SETTINGS
+// =========================================================================
+grp_pivot = "Pivot Settings"
+leftBars  = input.int(15, title="Pivot Left Bars", minval=1, group=grp_pivot)
+rightBars = input.int(15, title="Pivot Right Bars", minval=1, group=grp_pivot)
+
+grp_logic = "Strategy Core Rules"
+maxBars   = input.int(5, title="Max Bars for Fakeout (RB)", minval=1, group=grp_logic)
+maxBBWait = input.int(15, title="Max Bars to Wait for BB", minval=1, group=grp_logic)
+
+grp_sl    = "Dynamic Stop Loss Settings"
+useDynSL  = input.bool(true, title="Use Signal Candle Wick for SL", group=grp_sl, tooltip="If the signal candle is large, use its wick as the SL instead of the entire box structure.")
+minCndlPt = input.float(5.0, title="Min Candle Size (Points) for Dynamic SL", step=0.5, group=grp_sl)
+
+grp_qual  = "Setup Quality Filters"
+useSwingDepth = input.bool(true, title="Require Prominent Swing (Depth Filter)", group=grp_qual)
+swingAtrMult  = input.float(1.5, title="Minimum Swing Depth (ATR Multiplier)", step=0.5, group=grp_qual)
+useWickRej    = input.bool(false, title="Require Wick Rejection for Red Box", group=grp_qual)
+
+grp_risk  = "Take Profit Settings"
+rbRR      = input.float(2.0, title="Red Box Take Profit (RR)", step=0.5, group=grp_risk)
+bbRR      = input.float(3.0, title="Black Box Take Profit (RR)", step=0.5, group=grp_risk)
+
+grp_exec  = "Execution & Behavior"
+closePrev = input.bool(false, title="Close Previous Trade on New Signal", group=grp_exec)
+qtyType   = input.string("Fixed", title="Position Sizing Type", options=["Fixed", "$ Risk"], group=grp_exec)
+fixedQty  = input.float(1.0, title="Fixed Qty", step=1.0, group=grp_exec)
+riskAmt   = input.float(100.0, title="$ Risk Amount", step=10.0, group=grp_exec)
+roundQty  = input.bool(true, title="Round Qty to Whole Numbers", group=grp_exec)
+
+grp_time  = "Session Filter"
+useTime   = input.bool(false, title="Enable Session Filter", group=grp_time)
+sessStr   = input.session("0930-1600", title="Trading Session", group=grp_time)
+sessTz    = input.string("America/New_York", title="Time Zone", group=grp_time)
+
+grp_box   = "Visual Settings"
+redBoxCol = input.color(color.new(color.red, 70), title="Red Box Color", group=grp_box)
+blkBoxCol = input.color(color.new(color.gray, 70), title="Black Box Color", group=grp_box)
+showLines = input.bool(true, title="Show Pivot Levels", group=grp_box)
+
+// =========================================================================
+// 2. HELPER FUNCTIONS & INDICATORS
+// =========================================================================
+atr = ta.atr(14)
+plot(atr, title="ATR Value", display=display.data_window)
+
+inSession = useTime ? not na(time(timeframe.period, sessStr, sessTz)) : true
+
+calcQty(entryPrice, slPrice) =>
+    if qtyType == "Fixed"
+        fixedQty
+    else
+        riskDist = math.abs(entryPrice - slPrice)
+        if riskDist == 0
+            0.0
+        else
+            rawQty = riskAmt / (riskDist * syminfo.pointvalue)
+            roundQty ? math.max(1, math.floor(rawQty)) : rawQty
+
+// =========================================================================
+// 3. STRUCTURAL IDENTIFICATION & PROMINENCE TRACKING
+// =========================================================================
+ph = ta.pivothigh(high, leftBars, rightBars)
+pl = ta.pivotlow(low, leftBars, rightBars)
+
+var float resLevel = na
+var int   resState = 0   
+var float resExtreme = na
+var int   resBreakoutIdx = na
+var float resPullbackExtreme = na
+var int   resPullbackIdx = na
+var float resSwingLow = na 
+
+if not na(ph)
+    resLevel := ph
+    resState := 0 
+    resSwingLow := low
+
+if resState == 0 and not na(resLevel)
+    resSwingLow := math.min(resSwingLow, low)
+
+var float supLevel = na
+var int   supState = 0   
+var float supExtreme = na
+var int   supBreakoutIdx = na
+var float supPullbackExtreme = na
+var int   supPullbackIdx = na
+var float supSwingHigh = na 
+
+if not na(pl)
+    supLevel := pl
+    supState := 0 
+    supSwingHigh := high
+
+if supState == 0 and not na(supLevel)
+    supSwingHigh := math.max(supSwingHigh, high)
+
+plot(showLines ? resLevel : na, title="Resistance Pivot", color=color.new(color.red, 50), style=plot.style_stepline)
+plot(showLines ? supLevel : na, title="Support Pivot", color=color.new(color.green, 50), style=plot.style_stepline)
+
+// =========================================================================
+// 4. AUTOMATED CORE ENGINE
+// =========================================================================
+
+candleSize = high - low
+
+// --- A. RESISTANCE LOGIC (Red Box Short -> Black Box Long) ---
+if not na(resLevel)
+    validResSwing = useSwingDepth ? ((resLevel - resSwingLow) >= (atr * swingAtrMult)) : true
+    
+    if resState == 0 and close > resLevel and validResSwing
+        resState := 1
+        resExtreme := high
+        resBreakoutIdx := bar_index
+    
+    else if resState == 1
+        resExtreme := math.max(resExtreme, high) 
+        if close < resLevel 
+            validWick = useWickRej ? (high - math.max(open, close) > (math.abs(open - close) * 0.5)) : true
+            
+            if (bar_index - resBreakoutIdx) <= maxBars and validWick
+                resState := 2 
+                resPullbackExtreme := low
+                resPullbackIdx := bar_index
+                
+                // DYNAMIC STOP LOSS LOGIC
+                sl = (useDynSL and candleSize >= minCndlPt) ? high : resExtreme
+                risk = sl - close
+                tp = close - (risk * rbRR)
+                
+                box.new(left=resBreakoutIdx, top=resExtreme, right=bar_index, bottom=resLevel, bgcolor=redBoxCol, border_color=color.red)
+                label.new(x=bar_index, y=high, text="RB-S\n▼", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+                
+                if inSession
+                    if closePrev
+                        strategy.cancel_all()
+                        strategy.close_all()
+                    
+                    t_id = "RBS_" + str.tostring(bar_index)
+                    qty = calcQty(close, sl)
+                    strategy.entry(t_id, strategy.short, qty=qty)
+                    strategy.exit("Ex_"+t_id, from_entry=t_id, stop=sl, limit=tp)
+            else
+                resLevel := na 
+                resState := 0 
+    
+    else if resState == 2
+        resPullbackExtreme := math.min(resPullbackExtreme, low) 
+        if (bar_index - resPullbackIdx) > maxBBWait
+            resLevel := na 
+            resState := 0
+            
+        else if close > resLevel 
+            // DYNAMIC STOP LOSS LOGIC
+            sl = (useDynSL and candleSize >= minCndlPt) ? low : resPullbackExtreme
+            risk = close - sl
+            tp = close + (risk * bbRR)
+            
+            box.new(left=resPullbackIdx, top=resLevel, right=bar_index, bottom=resPullbackExtreme, bgcolor=blkBoxCol, border_color=color.gray)
+            label.new(x=bar_index, y=low, text="BB-L\n▲", style=label.style_label_up, color=color.black, textcolor=color.white, size=size.small)
+            
+            if inSession
+                if closePrev
+                    strategy.cancel_all()
+                    strategy.close_all()
+                
+                t_id = "BBL_" + str.tostring(bar_index)
+                qty = calcQty(close, sl)
+                strategy.entry(t_id, strategy.long, qty=qty)
+                strategy.exit("Ex_"+t_id, from_entry=t_id, stop=sl, limit=tp)
+                
+            resLevel := na 
+            resState := 0 
+
+// --- B. SUPPORT LOGIC (Red Box Long -> Black Box Short) ---
+if not na(supLevel)
+    validSupSwing = useSwingDepth ? ((supSwingHigh - supLevel) >= (atr * swingAtrMult)) : true
+
+    if supState == 0 and close < supLevel and validSupSwing
+        supState := 1
+        supExtreme := low
+        supBreakoutIdx := bar_index
+    
+    else if supState == 1
+        supExtreme := math.min(supExtreme, low) 
+        if close > supLevel 
+            validWick = useWickRej ? (math.min(open, close) - low > (math.abs(open - close) * 0.5)) : true
+            
+            if (bar_index - supBreakoutIdx) <= maxBars and validWick
+                supState := 2 
+                supPullbackExtreme := high
+                supPullbackIdx := bar_index
+                
+                // DYNAMIC STOP LOSS LOGIC
+                sl = (useDynSL and candleSize >= minCndlPt) ? low : supExtreme
+                risk = close - sl
+                tp = close + (risk * rbRR)
+
+                box.new(left=supBreakoutIdx, top=supLevel, right=bar_index, bottom=supExtreme, bgcolor=redBoxCol, border_color=color.red)
+                label.new(x=bar_index, y=low, text="RB-L\n▲", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+                
+                if inSession
+                    if closePrev
+                        strategy.cancel_all()
+                        strategy.close_all()
+                    
+                    t_id = "RBL_" + str.tostring(bar_index)
+                    qty = calcQty(close, sl)
+                    strategy.entry(t_id, strategy.long, qty=qty)
+                    strategy.exit("Ex_"+t_id, from_entry=t_id, stop=sl, limit=tp)
+            else
+                supLevel := na 
+                supState := 0 
+    
+    else if supState == 2
+        supPullbackExtreme := math.max(supPullbackExtreme, high) 
+        if (bar_index - supPullbackIdx) > maxBBWait
+            supLevel := na 
+            supState := 0
+            
+        else if close < supLevel 
+            // DYNAMIC STOP LOSS LOGIC
+            sl = (useDynSL and candleSize >= minCndlPt) ? high : supPullbackExtreme
+            risk = sl - close
+            tp = close - (risk * bbRR)
+            
+            box.new(left=supPullbackIdx, top=supPullbackExtreme, right=bar_index, bottom=supLevel, bgcolor=blkBoxCol, border_color=color.gray)
+            label.new(x=bar_index, y=high, text="BB-S\n▼", style=label.style_label_down, color=color.black, textcolor=color.white, size=size.small)
+            
+            if inSession
+                if closePrev
+                    strategy.cancel_all()
+                    strategy.close_all()
+                
+                t_id = "BBS_" + str.tostring(bar_index)
+                qty = calcQty(close, sl)
+                strategy.entry(t_id, strategy.short, qty=qty)
+                strategy.exit("Ex_"+t_id, from_entry=t_id, stop=sl, limit=tp)
+                
+            supLevel := na 
+            supState := 0
