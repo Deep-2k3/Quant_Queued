@@ -1,0 +1,228 @@
+//@version=6
+strategy("Inst. VP + SMC Stalker (DLL Protected)", overlay=true, initial_capital=100000, margin_long=10, margin_short=10)
+
+// --- Settings ---
+int bins = input.int(20, "Profile Bins", minval=10)
+float rrTarget = input.float(2.0, "Risk/Reward Target")
+float zoneTicks = input.float(100.0, "Sweep Zone (Ticks)")
+string sessionTime = input.session("0930-1530", "Trading Session (EST)")
+string eodTime = input.session("1545-1600", "EOD Flat Time (EST)")
+
+// Risk Management
+float riskPerTrade = input.float(300.0, "Risk Per Trade ($)")
+float dllAmount = input.float(600.0, "Daily Loss Limit ($)")
+bool useBE = input.bool(true, "Move to BE (Triggered at 1.5R)")
+
+// --- Global Tracking ---
+var float[] profilePrices = array.new_float(bins, 0.0)
+var float[] profileVols = array.new_float(bins, 0.0)
+var float dayHigh = high
+var float dayLow = low
+
+var float prevPOC = na
+var float prevHVN_Top = na
+var float prevHVN_Bot = na
+var string dailyBias = "None"
+
+// DLL & Equity Tracking
+var float startOfDayEquity = 100000.0 // Default fallback
+var bool isDllHit = false
+
+// State Machine
+var bool stalkingShort = false
+var bool stalkingLong = false
+var float swingHigh = na
+var float swingLow = na
+
+// Trade Management
+var float entryPrice = na
+var float activeStop = na
+var float activeTarget = na
+var float beTriggerLevel = na
+
+float prevDailyAtr = request.security(syminfo.tickerid, "D", ta.atr(14)[1])
+
+// --- Detect New Day & Calculate Profile ---
+isNewDay = ta.change(time("D")) != 0
+
+if isNewDay
+    // Set Start of Day Equity for DLL Calculation
+    startOfDayEquity := strategy.equity
+    isDllHit := false
+
+    float prevDayHigh = dayHigh
+    float prevDayLow = dayLow
+    float prevDayClose = close[1]
+    float midPoint = (prevDayHigh + prevDayLow) / 2
+    
+    float maxVol = 0.0
+    int pocIndex = 0
+    for i = 0 to bins - 1
+        float vol = array.get(profileVols, i)
+        if vol > maxVol
+            maxVol := vol
+            pocIndex := i
+            
+    prevPOC := array.get(profilePrices, pocIndex)
+    
+    float maxVolTop = 0.0
+    float maxVolBot = 0.0
+    int topHVNIndex = -1
+    int botHVNIndex = -1
+    
+    for i = 0 to bins - 1
+        float vol = array.get(profileVols, i)
+        if i > pocIndex + 2 and vol > maxVolTop
+            maxVolTop := vol
+            topHVNIndex := i
+        if i < pocIndex - 2 and vol > maxVolBot
+            maxVolBot := vol
+            botHVNIndex := i
+            
+    prevHVN_Top := topHVNIndex != -1 ? array.get(profilePrices, topHVNIndex) : na
+    prevHVN_Bot := botHVNIndex != -1 ? array.get(profilePrices, botHVNIndex) : na
+
+    bool closeAbove50 = prevDayClose > midPoint
+    bool isTrendDay = not na(prevDailyAtr) and (prevDayHigh - prevDayLow) > (prevDailyAtr * 1.5)
+    
+    if isTrendDay
+        dailyBias := closeAbove50 ? "Thin Up" : "Thin Down"
+    else if prevPOC > midPoint and closeAbove50
+        dailyBias := "P-Shape" 
+    else if prevPOC < midPoint and not closeAbove50
+        dailyBias := "b-Shape" 
+    else
+        dailyBias := "D-Shape" 
+
+    dayHigh := high
+    dayLow := low
+    for i = 0 to bins - 1
+        array.set(profileVols, i, 0.0)
+    
+    stalkingShort := false
+    stalkingLong := false
+
+// --- Intraday Accumulation ---
+dayHigh := math.max(dayHigh, high)
+dayLow := math.min(dayLow, low)
+
+if dayHigh > dayLow
+    float binSize = (dayHigh - dayLow) / bins
+    int currentBin = math.floor((close - dayLow) / binSize)
+    currentBin := math.max(0, math.min(currentBin, bins - 1))
+    for i = 0 to bins - 1
+        array.set(profilePrices, i, dayLow + (i * binSize) + (binSize / 2))
+    float currentVol = array.get(profileVols, currentBin)
+    array.set(profileVols, currentBin, currentVol + volume)
+
+// --- Time Constraints & DLL Check ---
+bool inSession = not na(time(timeframe.period, sessionTime, "America/New_York"))
+bool isEOD = not na(time(timeframe.period, eodTime, "America/New_York"))
+
+// Calculate Daily PnL
+float dailyPnL = strategy.equity - startOfDayEquity
+
+// Check DLL Status
+if dailyPnL <= -dllAmount
+    isDllHit := true
+    strategy.close_all(comment="DLL HIT")
+    stalkingShort := false
+    stalkingLong := false
+
+if not inSession
+    stalkingShort := false
+    stalkingLong := false
+
+if isEOD
+    strategy.close_all(comment="EOD Flat")
+
+// --- Execution Logic ---
+float tickSize = syminfo.mintick
+float tolerance = zoneTicks * tickSize
+
+// Tagging the Zone
+bool touchesTop = not na(prevHVN_Top) and (high >= prevHVN_Top - tolerance and high <= prevHVN_Top + tolerance) or (dailyBias == "b-Shape" and not na(prevPOC) and high >= prevPOC - tolerance and high <= prevPOC + tolerance)
+bool touchesBot = not na(prevHVN_Bot) and (low <= prevHVN_Bot + tolerance and low >= prevHVN_Bot - tolerance) or (dailyBias == "P-Shape" and not na(prevPOC) and low >= prevPOC - tolerance and low <= prevPOC + tolerance)
+
+if inSession and not isDllHit
+    if touchesTop and (dailyBias == "b-Shape" or dailyBias == "D-Shape" or dailyBias == "Thin Down")
+        stalkingShort := true
+        stalkingLong := false 
+    if touchesBot and (dailyBias == "P-Shape" or dailyBias == "D-Shape" or dailyBias == "Thin Up")
+        stalkingLong := true
+        stalkingShort := false 
+
+if stalkingShort
+    swingHigh := math.max(nz(swingHigh, high), high)
+    if low < prevHVN_Top - (tolerance * 1.5) and strategy.position_size == 0 
+        stalkingShort := false
+        swingHigh := na
+
+if stalkingLong
+    swingLow := math.min(nz(swingLow, low), low)
+    if high > prevHVN_Bot + (tolerance * 1.5) and strategy.position_size == 0 
+        stalkingLong := false
+        swingLow := na
+
+// The Trigger (FVG)
+bool isBearFVG = high < low[2] and close < low[1] 
+bool isBullFVG = low > high[2] and close > high[1] 
+
+// Cooldown to prevent immediate revenge trading after a stop out
+var int barsSinceLastTrade = 0
+if strategy.position_size != 0
+    barsSinceLastTrade := 0
+else
+    barsSinceLastTrade += 1
+
+bool cooldownPassed = barsSinceLastTrade > 5 // Wait at least 5 bars (25 mins on 5m) before re-entering
+
+if stalkingShort and isBearFVG and strategy.position_size == 0 and cooldownPassed and not isDllHit
+    float stopDistance = math.max(swingHigh - close, tickSize)
+    float contractQty = math.floor(riskPerTrade / (stopDistance * syminfo.pointvalue))
+    
+    if contractQty >= 1 
+        float risk = swingHigh - close
+        activeTarget := close - (risk * rrTarget)
+        activeStop := swingHigh
+        entryPrice := close
+        beTriggerLevel := close - (risk * 1.5) // Wait for 1.5R to move to BE
+        
+        strategy.entry("Inst Short", strategy.short, qty=contractQty)
+        strategy.exit("Exit Short", "Inst Short", stop=activeStop, limit=activeTarget)
+        stalkingShort := false 
+        swingHigh := na
+
+if stalkingLong and isBullFVG and strategy.position_size == 0 and cooldownPassed and not isDllHit
+    float stopDistance = math.max(close - swingLow, tickSize) 
+    float contractQty = math.floor(riskPerTrade / (stopDistance * syminfo.pointvalue))
+    
+    if contractQty >= 1 
+        float risk = close - swingLow
+        activeTarget := close + (risk * rrTarget)
+        activeStop := swingLow
+        entryPrice := close
+        beTriggerLevel := close + (risk * 1.5) // Wait for 1.5R to move to BE
+        
+        strategy.entry("Inst Long", strategy.long, qty=contractQty)
+        strategy.exit("Exit Long", "Inst Long", stop=activeStop, limit=activeTarget)
+        stalkingLong := false 
+        swingLow := na
+
+// --- Trade Management (Break Even) ---
+if strategy.position_size > 0 and useBE // Long
+    if high >= beTriggerLevel and activeStop < entryPrice
+        activeStop := entryPrice
+        strategy.exit("Exit Long", "Inst Long", stop=activeStop, limit=activeTarget)
+
+if strategy.position_size < 0 and useBE // Short
+    if low <= beTriggerLevel and activeStop > entryPrice
+        activeStop := entryPrice
+        strategy.exit("Exit Short", "Inst Short", stop=activeStop, limit=activeTarget)
+
+// Visuals
+plot(prevPOC, color=color.new(color.red, 40), style=plot.style_linebr, title="POC")
+plot(prevHVN_Top, color=color.new(color.blue, 40), style=plot.style_linebr, title="Top HVN")
+plot(prevHVN_Bot, color=color.new(color.blue, 40), style=plot.style_linebr, title="Bot HVN")
+bgcolor(stalkingShort ? color.new(color.red, 90) : stalkingLong ? color.new(color.green, 90) : na, title="Stalking Phase")
+bgcolor(isDllHit ? color.new(color.red, 80) : na, title="DLL Hit")
