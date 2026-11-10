@@ -1,147 +1,415 @@
 //@version=6
-indicator("LiquidityEdge | Master Reset (V21)", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+indicator("LiquidityEdge | Dynamic Master (Clean V3)", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
 // ========================================================================= //
-// --- 1. SETTINGS ---
+// --- 1. SETTINGS & INPUTS ---
 // ========================================================================= //
-grpLE = "LIQUIDITYEDGE CORE"
-swingLen   = input.int(2, "Swing Length", minval=1, group=grpLE)
-invalType  = input.string("Close", "Invalidation", options=["Close", "Wick"], group=grpLE)
-maxZones   = input.int(20, "Show Nearest LTF", group=grpLE)
-projBars   = input.int(60, "Extend Zones (bars)", group=grpLE) 
+grpHTF  = "HTF Overlay Dashboard (Top Right)"
+showHUD = input.bool(true, "Show Dashboard HUD", group=grpHTF)
+selHTF  = input.string("15m", "Select HTF Overlay", options=["None", "5m", "15m", "1H", "4H", "1D"], group=grpHTF, tooltip="Select the Higher Timeframe to overlay as dim white blocks.")
+htfLen  = input.int(3, "HTF Swing Length", group=grpHTF)
+maxHTF  = input.int(5, "Max Active HTF Blocks", group=grpHTF)
 
-grpDepth = "DEPTHFLOW DOMINANCE"
-volDataTF  = input.timeframe("15S", "Volume Data TF", group=grpDepth)
-minDom     = input.int(60, "Filter: Min Dominant %", group=grpDepth)
-ctrlPct    = input.int(75, "High Control % (A+)", group=grpDepth)
+grpCore = "Core Execution Logic"
+swingLen   = input.int(5, "Swing Length", minval=2, group=grpCore)
+zoneCalc   = input.string("Highest Volume Node (LTF)", "Zone Calculation", options=["Wick to Body (Order Block)", "Highest Volume Node (LTF)", "Candle Body (Open-Close)", "Full Candle (High-Low)"], group=grpCore)
+invalType  = input.string("Close", "Invalidation", options=["Close", "Wick"], group=grpCore)
+slBuffer   = input.int(20, "Stop Loss Buffer (Ticks)", group=grpCore)
+projBars   = input.int(50, "Right Extension (Bars)", group=grpCore) 
+hideOverlap= input.bool(true, "Hide Internal Overlaps", group=grpCore)
+maxZones   = input.int(20, "Max Active Zones", group=grpCore)
+cleanChart = input.bool(true, "Delete Mitigated Zones", group=grpCore)
 
-grpLines = "ENTRY / STOP LINES"
-slBuffer   = input.int(8, "Stop Loss Offset (ticks)", group=grpLines)
-showLimit  = input.bool(true, "Show Entry Limit", group=grpLines)
+grpVol  = "Order Flow (Delta Engine)"
+minDom  = input.float(60.0, "Minimum Dominance % Filter", minval=0, maxval=100, group=grpVol, tooltip=">60% filters retail OBs. The LTF resolution scales automatically based on your chart TF.")
+minVol  = input.float(0.0, "Minimum Volume Filter", minval=0, group=grpVol, tooltip="Minimum total volume required on the pivot candle to draw a block (e.g., 1000).")
 
-grpVis = "MEMORY GATE"
-histDays   = input.int(3, "Calculate Last X Days", minval=1, group=grpVis)
-colSup     = input.color(color.new(#089981, 70), "Demand Color", group=grpVis)
-colRes     = input.color(color.new(#F23645, 70), "Supply Color", group=grpVis)
-colA       = color.new(#00E676, 0)
-colB       = color.new(#FFEB3B, 0)
-colTransp  = color.new(color.white, 100)
+grpVis  = "Institutional Theme Colors"
+colSup  = input.color(color.new(#089981, 85), "Demand (Green)", group=grpVis)
+colRes  = input.color(color.new(#F23645, 85), "Supply (Red)", group=grpVis)
+colSL   = input.color(color.new(#FF5252, 70), "Stop Loss Line", group=grpVis)
+colBuy  = input.color(color.new(#00E676, 70), "Limit Line", group=grpVis)
+
+colA = color.new(#00E676, 10)
+colB = color.new(#FFEB3B, 10)
+colC = color.new(#FF5252, 10)
+colTransp = color.new(color.white, 100)
 
 // ========================================================================= //
 // --- 2. TYPES & ARRAYS ---
 // ========================================================================= //
 type DepthZone
-    int originBar
-    box bgBox
-    line limitLine
-    line slLine
+    int   originBar
+    box   bgBox
+    line  limitLine
+    line  slLine
     label volLbl
     label gradeLbl
     label deltaLbl
-    bool isDemand
+    bool  isDemand
     float top
     float bottom
-    bool isActive
+    float slPrice
+    bool  isActive
+    bool  isPendingDelete 
 
-var activeLTF = array.new<DepthZone>()
+type HTFZone
+    int   originBar
+    box   bgBox
+    bool  isDemand
+    float top
+    float bottom
+    bool  isActive
 
-// ========================================================================= //
-// --- 3. DATA ENGINE (FIXED SYNTAX) ---
-// ========================================================================= //
-isClose  = barstate.isconfirmed
-isRecent = time > (timenow - (histDays * 86400000))
-tickSize = syminfo.mintick
+var activeLTF  = array.new<DepthZone>()
+var activeHTF  = array.new<HTFZone>()
 
-// FIX: Correct tuple assignment for security_lower_tf
-[ltf_o, ltf_h, ltf_l, ltf_c, ltf_v] = request.security_lower_tf(syminfo.tickerid, volDataTF, [open, high, low, close, volume])
-
-float buyV  = 0.0
-float sellV = 0.0
-
-if isClose and isRecent
-    int _sz = na(ltf_v) ? 0 : array.size(ltf_v)
-    if _sz > 0
-        for i = 0 to _sz - 1
-            float _v = array.get(ltf_v, i)
-            if array.get(ltf_c, i) >= array.get(ltf_o, i)
-                buyV += _v
-            else
-                sellV += _v
-    else
-        float r = math.max(high - low, 0.0001)
-        buyV := ((close - low) / r) * volume
-        sellV := volume - buyV
+float avgVol = ta.sma(volume, 50)
+bool isClose = barstate.isconfirmed
+bool isNewBar = ta.change(time) != 0
 
 // ========================================================================= //
-// --- 4. ZONE GEOMETRY ---
+// --- 3. DYNAMIC LTF ENGINE ---
 // ========================================================================= //
-f_create_zone(_isDemand, _pBar, _h, _l, _o, _c, _vol, _bV, _sV) =>
-    float bPct = (_bV / math.max(_vol, 1)) * 100
-    float sPct = (_sV / math.max(_vol, 1)) * 100
-    float domP = _isDemand ? bPct : sPct
-    
-    if domP >= minDom
-        // MIG GEOMETRY: Body-weighted 50% High/Low Range
-        float midPoint = (_h + _l) / 2
-        float _top = _isDemand ? math.max(_o, _c) : _h
-        float _bot = _isDemand ? _l : math.min(_o, _c)
-        
-        if _isDemand
-            _top := math.max(midPoint, math.min(_o, _c))
+f_get_dynamic_ltf() =>
+    string tf = "1"
+    if timeframe.isminutes
+        if timeframe.multiplier <= 15
+            tf := "1"
+        else if timeframe.multiplier <= 240
+            tf := "5"
         else
-            _bot := math.min(midPoint, math.max(_o, _c))
+            tf := "15"
+    else if timeframe.isdaily
+        tf := "60"
+    else
+        tf := "240"
+    tf
 
-        float _slP = _isDemand ? (_l - (slBuffer * tickSize)) : (_h + (slBuffer * tickSize))
-        
-        avgV = ta.sma(volume, 50)
-        string g1 = _vol > (avgV * 1.5) ? "A+" : "B"
-        string g2 = domP > ctrlPct ? "A+" : "B"
-        string grade = g1 + g2 + "C"
-        
-        color gCol = domP > ctrlPct ? colA : colB
-        string deltaTxt = "B " + str.tostring(math.round(bPct)) + "% | S " + str.tostring(math.round(sPct)) + "%"
-        string vTxt = _vol >= 1000 ? str.tostring(_vol / 1000, "#.###") + "K" : str.tostring(_vol, "#")
+actualLTF = f_get_dynamic_ltf()
 
-        _r = bar_index + projBars
-        _box = box.new(_pBar, _top, _r, _bot, bgcolor=_isDemand ? colSup : colRes, border_color=color.new(color.white, 90))
-        _lmt = line.new(_pBar, _isDemand ? _top : _bot, _r, _isDemand ? _top : _bot, color=_isDemand ? colSup : colRes, style=line.style_dotted)
-        _sl  = line.new(_pBar, _slP, _r, _slP, color=color.new(#FF5252, 60), style=line.style_dotted)
-        
-        _dLbl = label.new(int((_pBar+_r)/2), (_top+_bot)/2, deltaTxt, textcolor=color.new(color.white, 40), color=colTransp, style=label.style_none, size=size.small)
-        _vLbl = label.new(_r, (_top+_bot)/2, vTxt + "  ", textcolor=color.new(color.white, 50), color=colTransp, style=label.style_label_right, size=size.small)
-        _gLbl = label.new(_r, (_top+_bot)/2, "  " + grade, textcolor=gCol, color=colTransp, style=label.style_label_left, size=size.small)
-
-        activeLTF.push(DepthZone.new(_pBar, _box, _lmt, _sl, _vLbl, _gLbl, _dLbl, _isDemand, _top, _bot, true))
+ltf_bVol_arr = request.security_lower_tf(syminfo.tickerid, actualLTF, close >= open ? volume : 0)
+ltf_sVol_arr = request.security_lower_tf(syminfo.tickerid, actualLTF, close < open ? volume : 0)
+ltf_v_arr    = request.security_lower_tf(syminfo.tickerid, actualLTF, volume)
+ltf_h_arr    = request.security_lower_tf(syminfo.tickerid, actualLTF, high)
+ltf_l_arr    = request.security_lower_tf(syminfo.tickerid, actualLTF, low)
 
 // ========================================================================= //
-// --- 5. EXECUTION ---
+// --- 4. HUD DASHBOARD & HTF OVERLAY ENGINE ---
+// ========================================================================= //
+var table hud = table.new(position.top_right, 6, 1, bgcolor=color.new(#131722, 20), border_width=1, border_color=color.new(color.white, 90))
+
+if barstate.isfirst and showHUD
+    table.cell(hud, 0, 0, "HTF:", text_color=color.new(color.white, 50), text_size=size.small)
+    arr = array.from("5m", "15m", "1H", "4H", "1D")
+    for i = 0 to 4
+        _tf = array.get(arr, i)
+        _isActive = selHTF == _tf
+        _bg = _isActive ? color.new(color.white, 80) : color.new(#131722, 100)
+        _txt = _isActive ? color.white : color.new(color.white, 60)
+        table.cell(hud, i + 1, 0, _tf, text_color=_txt, bgcolor=_bg, text_size=size.small)
+
+f_get_htf_res() =>
+    if selHTF == "5m"
+        "5"
+    else if selHTF == "15m"
+        "15"
+    else if selHTF == "1H"
+        "60"
+    else if selHTF == "4H"
+        "240"
+    else if selHTF == "1D"
+        "D"
+    else
+        "60"
+
+safeHTF = f_get_htf_res()
+
+// Added Volume to the HTF data extraction
+f_htf_data() =>
+    _ph = ta.pivothigh(high, htfLen, htfLen)
+    _pl = ta.pivotlow(low, htfLen, htfLen)
+    _t  = time[htfLen]
+    _h  = high[htfLen]
+    _l  = low[htfLen]
+    _o  = open[htfLen]
+    _c  = close[htfLen]
+    _v  = volume[htfLen]
+    [_ph, _pl, _t, _h, _l, _o, _c, _v]
+
+[h_ph, h_pl, h_t, h_h, h_l, h_o, h_c, h_v] = request.security(syminfo.tickerid, safeHTF, f_htf_data(), gaps=barmerge.gaps_off)
+
+var float last_htf_ph_t = 0.0
+var float last_htf_pl_t = 0.0
+bool new_h_ph = not na(h_ph) and h_t != last_htf_ph_t
+bool new_h_pl = not na(h_pl) and h_t != last_htf_pl_t
+
+if new_h_ph
+    last_htf_ph_t := h_t
+if new_h_pl
+    last_htf_pl_t := h_t
+
+if selHTF != "None"
+    if new_h_ph
+        // Gatekeeper Math applied to HTF Supply
+        float c_range = math.max(h_h - h_l, 0.0001)
+        float sPct = ((h_h - h_c) / c_range) * 100
+        
+        if sPct >= minDom and h_v >= minVol
+            float _top = h_h
+            float _bot = math.max(h_o, h_c)
+            int _orig = bar_index
+            for i = 0 to 500
+                if i > bar_index
+                    break
+                if time[i] <= h_t
+                    _orig := bar_index[i]
+                    break
+            _box = box.new(_orig, _top, bar_index + projBars, _bot, bgcolor=color.new(color.white, 93), border_color=color.new(color.white, 85))
+            activeHTF.push(HTFZone.new(_orig, _box, false, _top, _bot, true))
+        
+    if new_h_pl
+        // Gatekeeper Math applied to HTF Demand
+        float c_range = math.max(h_h - h_l, 0.0001)
+        float bPct = ((h_c - h_l) / c_range) * 100
+        
+        if bPct >= minDom and h_v >= minVol
+            float _top = math.min(h_o, h_c)
+            float _bot = h_l
+            int _orig = bar_index
+            for i = 0 to 500
+                if i > bar_index
+                    break
+                if time[i] <= h_t
+                    _orig := bar_index[i]
+                    break
+            _box = box.new(_orig, _top, bar_index + projBars, _bot, bgcolor=color.new(color.white, 93), border_color=color.new(color.white, 85))
+            activeHTF.push(HTFZone.new(_orig, _box, true, _top, _bot, true))
+
+if activeHTF.size() > 0
+    if selHTF == "None"
+        for i = activeHTF.size() - 1 to 0
+            z = activeHTF.get(i)
+            box.delete(z.bgBox)
+            activeHTF.remove(i)
+    else
+        for i = activeHTF.size() - 1 to 0
+            z = activeHTF.get(i)
+            if z.isActive
+                if isNewBar
+                    box.set_right(z.bgBox, bar_index + projBars)
+                isBroken = false
+                if invalType == "Close"
+                    if isClose 
+                        if (z.isDemand and close < z.bottom) or (not z.isDemand and close > z.top)
+                            isBroken := true
+                else 
+                    if (z.isDemand and low < z.bottom) or (not z.isDemand and high > z.top)
+                        isBroken := true
+                if isBroken
+                    z.isActive := false
+                    if cleanChart
+                        box.delete(z.bgBox)
+                    activeHTF.remove(i)
+        while activeHTF.size() > maxHTF
+            oldest = activeHTF.shift()
+            box.delete(oldest.bgBox)
+
+// ========================================================================= //
+// --- 5. ZONE CREATION LOGIC (LTF) ---
 // ========================================================================= //
 ph = ta.pivothigh(high, swingLen, swingLen)
 pl = ta.pivotlow(low, swingLen, swingLen)
+tickSize = syminfo.mintick
 
-if isClose and isRecent
-    if not na(ph)
-        for i = 0 to (swingLen * 2)
-            f_create_zone(false, bar_index[i], high[i], low[i], open[i], close[i], volume[i], buyV[i], sellV[i])
-    if not na(pl)
-        for i = 0 to (swingLen * 2)
-            f_create_zone(true, bar_index[i], high[i], low[i], open[i], close[i], volume[i], buyV[i], sellV[i])
+f_checkOverlap(_isDemand, _top, _bottom) =>
+    overlap = false
+    if hideOverlap and activeLTF.size() > 0
+        for i = 0 to activeLTF.size() - 1
+            z = activeLTF.get(i)
+            if z.isDemand == _isDemand and z.isActive and not z.isPendingDelete
+                if math.max(_bottom, z.bottom) <= math.min(_top, z.top)
+                    overlap := true
+                    break
+    overlap
 
+f_create_zone(_isDemand, _pBar, _sHigh, _sLow, _sOpen, _sClose, _vol, _bVol, _sVol, _avgVol, _isPureData, _hTop, _hBot) =>
+    float bPct = 50.0
+    float sPct = 50.0
+    
+    if _isPureData and _vol > 0
+        bPct := (_bVol / _vol) * 100
+        sPct := (_sVol / _vol) * 100
+    else
+        float c_range = math.max(_sHigh - _sLow, 0.0001)
+        bPct := ((_sClose - _sLow) / c_range) * 100
+        sPct := ((_sHigh - _sClose) / c_range) * 100
+
+    float domPct = _isDemand ? bPct : sPct
+    
+    if domPct >= minDom
+        float _top = _sHigh
+        float _bot = _sLow
+        
+        if zoneCalc == "Wick to Body (Order Block)"
+            _top := _isDemand ? math.min(_sOpen, _sClose) : _sHigh
+            _bot := _isDemand ? _sLow : math.max(_sOpen, _sClose)
+        else if zoneCalc == "Highest Volume Node (LTF)"
+            _top := _isDemand ? _hTop : _sHigh
+            _bot := _isDemand ? _sLow : _hBot
+        else if zoneCalc == "Candle Body (Open-Close)"
+            _top := math.max(_sOpen, _sClose)
+            _bot := math.min(_sOpen, _sClose)
+            
+        if not f_checkOverlap(_isDemand, _top, _bot)
+            float _extreme = _isDemand ? _sLow : _sHigh
+            float _slDist  = slBuffer * tickSize
+            float _slPrice = _isDemand ? (_extreme - _slDist) : (_extreme + _slDist)
+            
+            vScore = _vol > (_avgVol * 1.5) ? 3 : (_vol > _avgVol ? 2 : 1)
+            g1 = vScore == 3 ? "A+" : (vScore == 2 ? "B" : "C")
+            
+            dScore = domPct > 70 ? 3 : (domPct > 60 ? 2 : 1)
+            g2 = dScore == 3 ? "A+" : (dScore == 2 ? "B" : "C")
+            
+            string gradeTxt = g1 + g2
+            int totalScore = vScore + dScore
+            color gradeCol = totalScore >= 5 ? colA : (totalScore == 4 ? colB : colC)
+
+            string dataMark = _isPureData ? "" : "*"
+            string mathMark = _isPureData ? "" : "M"
+            
+            string deltaTxt = "B " + str.tostring(math.round(bPct)) + "%" + dataMark + " | S " + str.tostring(math.round(sPct)) + "%" + dataMark
+            
+            string volTxt = ""
+            if _vol >= 1000
+                volTxt := str.tostring(nz(_vol, 0) / 1000, "#.###") + "K" + mathMark
+            else
+                volTxt := str.tostring(nz(_vol, 0), "#") + mathMark
+
+            _zoneCol   = _isDemand ? colSup : colRes
+            _limitCol  = _isDemand ? colBuy : colSL
+            _mid       = (_top + _bot) / 2
+            _rEdge     = bar_index + projBars
+            
+            _box     = box.new(_pBar, _top, _rEdge, _bot, bgcolor=_zoneCol, border_color=color.new(_zoneCol, 30))
+            _lmtLine = line.new(_pBar, _isDemand ? _top : _bot, _rEdge, _isDemand ? _top : _bot, color=_limitCol, style=line.style_dotted)
+            _slLine  = line.new(_pBar, _slPrice, _rEdge, _slPrice, color=colSL, style=line.style_dotted)
+            
+            _deltaLbl = label.new(math.round((_pBar + _rEdge) / 2), _mid, deltaTxt, textcolor=color.new(color.white, 30), color=colTransp, style=label.style_none, size=size.small)
+            _volLbl   = label.new(_rEdge, _mid, volTxt + "  ", textcolor=color.new(color.white, 40), color=colTransp, style=label.style_label_right, size=size.small)
+            _gradeLbl = label.new(_rEdge, _mid, "  " + gradeTxt, textcolor=gradeCol, color=colTransp, style=label.style_label_left, size=size.small)
+            
+            activeLTF.push(DepthZone.new(_pBar, _box, _lmtLine, _slLine, _volLbl, _gradeLbl, _deltaLbl, _isDemand, _top, _bot, _slPrice, true, false))
+            
+            while activeLTF.size() > maxZones
+                oldest = activeLTF.shift()
+                box.delete(oldest.bgBox)
+                line.delete(oldest.limitLine)
+                line.delete(oldest.slLine)
+                label.delete(oldest.volLbl)
+                label.delete(oldest.gradeLbl)
+                label.delete(oldest.deltaLbl)
+
+// ========================================================================= //
+// --- 6. DATA EXTRACTION & EXECUTION ---
+// ========================================================================= //
+bool isPivot = not na(ph) or not na(pl)
+
+if isPivot
+    float p_totalVol = nz(volume[swingLen], 0) 
+    
+    if p_totalVol >= minVol
+        float p_buyVol = 0.0
+        float p_sellVol = 0.0
+        bool hasPureData = false
+        
+        float p_hTop = high[swingLen]
+        float p_hBot = low[swingLen]
+        
+        array<float> past_bArr = ltf_bVol_arr[swingLen]
+        array<float> past_sArr = ltf_sVol_arr[swingLen]
+        array<float> past_vArr = ltf_v_arr[swingLen]
+        array<float> past_hArr = ltf_h_arr[swingLen]
+        array<float> past_lArr = ltf_l_arr[swingLen]
+        
+        if not na(past_bArr) and array.size(past_bArr) > 0
+            hasPureData := true
+            float _sumB = array.sum(past_bArr)
+            float _sumS = array.sum(past_sArr)
+            float _ltfSum = _sumB + _sumS
+            
+            if _ltfSum > 0
+                p_buyVol := (_sumB / _ltfSum) * p_totalVol
+                p_sellVol := (_sumS / _ltfSum) * p_totalVol
+
+            float maxV = -1.0
+            for i = 0 to array.size(past_vArr) - 1
+                float _v = nz(array.get(past_vArr, i), 0.0)
+                if _v > maxV
+                    maxV := _v
+                    p_hTop := array.get(past_hArr, i)
+                    p_hBot := array.get(past_lArr, i)
+
+        if not hasPureData
+            float c_range = math.max(high[swingLen] - low[swingLen], 0.0001)
+            p_buyVol  := ((close[swingLen] - low[swingLen]) / c_range) * p_totalVol
+            p_sellVol := p_totalVol - p_buyVol
+
+        if not na(ph)
+            f_create_zone(false, bar_index[swingLen], high[swingLen], low[swingLen], open[swingLen], close[swingLen], p_totalVol, p_buyVol, p_sellVol, avgVol[swingLen], hasPureData, p_hTop, p_hBot)
+
+        if not na(pl)
+            f_create_zone(true, bar_index[swingLen], high[swingLen], low[swingLen], open[swingLen], close[swingLen], p_totalVol, p_buyVol, p_sellVol, avgVol[swingLen], hasPureData, p_hTop, p_hBot)
+
+// ========================================================================= //
+// --- 7. SAFE GARBAGE COLLECTION & UI UPDATER ---
+// ========================================================================= //
 if activeLTF.size() > 0
     for i = activeLTF.size() - 1 to 0
         z = activeLTF.get(i)
+        
         if z.isActive
-            if barstate.islast
-                box.set_right(z.bgBox, bar_index + projBars)
-                line.set_x2(z.limitLine, bar_index + projBars)
-                line.set_x2(z.slLine, bar_index + projBars)
-                label.set_x(z.volLbl, bar_index + projBars)
-                label.set_x(z.gradeLbl, bar_index + projBars)
-                label.set_x(z.deltaLbl, int((z.originBar + (bar_index + projBars))/2))
+            if isNewBar
+                boxRight = bar_index + projBars
+                box.set_right(z.bgBox, boxRight)
+                line.set_x2(z.limitLine, boxRight)
+                line.set_x2(z.slLine, boxRight)
+                label.set_x(z.volLbl, boxRight)
+                label.set_x(z.gradeLbl, boxRight)
+                label.set_x(z.deltaLbl, math.round((z.originBar + boxRight) / 2)) 
             
-            isBroken = invalType == "Close" ? (z.isDemand ? close < z.bottom : close > z.top) : (z.isDemand ? low < z.bottom : high > z.top)
-            if isBroken and isClose
+            isBroken = false
+            if invalType == "Close"
+                if isClose 
+                    if z.isDemand and close < z.bottom
+                        isBroken := true
+                    else if not z.isDemand and close > z.top
+                        isBroken := true
+            else 
+                if z.isDemand and low < z.bottom
+                    isBroken := true
+                else if not z.isDemand and high > z.top
+                    isBroken := true
+                    
+            if isBroken
                 z.isActive := false
-                box.delete(z.bgBox), line.delete(z.limitLine), line.delete(z.slLine)
-                label.delete(z.volLbl), label.delete(z.gradeLbl), label.delete(z.deltaLbl)
-                activeLTF.remove(i)
+                z.isPendingDelete := true
+                if cleanChart
+                    box.set_bgcolor(z.bgBox, colTransp)
+                    box.set_border_color(z.bgBox, colTransp)
+                    line.set_color(z.limitLine, colTransp)
+                    line.set_color(z.slLine, colTransp)
+                    label.set_textcolor(z.volLbl, colTransp)
+                    label.set_textcolor(z.gradeLbl, colTransp)
+                    label.set_textcolor(z.deltaLbl, colTransp)
+
+        if z.isPendingDelete and isClose
+            if cleanChart
+                box.delete(z.bgBox)
+                line.delete(z.limitLine)
+                line.delete(z.slLine)
+                label.delete(z.volLbl)
+                label.delete(z.gradeLbl)
+                label.delete(z.deltaLbl)
+            activeLTF.remove(i)
