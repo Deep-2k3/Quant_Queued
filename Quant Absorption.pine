@@ -1,5 +1,5 @@
 //@version=6
-indicator("Quant Absorption: Pinned Footprint", overlay=true, max_boxes_count=100)
+indicator("Quant Absorption Pro", overlay=true, max_boxes_count=100)
 
 // ========================================================================= //
 // 1. UI & PARAMETERS
@@ -7,32 +7,30 @@ indicator("Quant Absorption: Pinned Footprint", overlay=true, max_boxes_count=10
 group_core = "Core Logic"
 market_type = input.string("NQ (Volatile)", "Market Preset", options=["NQ (Volatile)", "GC (Liquid/Churn)"], group=group_core)
 lookback    = input.int(100, "Volume Lookback (Z-Score)", minval=20, group=group_core)
-z_threshold = input.float(2.0, "Volume Z-Score Threshold", step=0.1, group=group_core)
+z_threshold = input.float(2.0, "Volume Z-Score Threshold", step=0.1, group=group_core, tooltip="Standard deviations from the mean. 2.0 is the 95th percentile.")
 
 group_geom = "Geometry & Wick Filters"
 wick_mult  = input.float(1.5, "Min Wick/Body Ratio", step=0.1, group=group_geom)
+show_bubbles = input.bool(true, "Show Absorption Bubbles", group=group_geom)
 
-group_vis = "Visuals & Aesthetics"
-show_bubbles = input.bool(true, "Show Order Flow Bubbles", group=group_vis)
-show_zones   = input.bool(true, "Draw Unmitigated Zones", group=group_vis)
-
-// Colors with transparency (alpha 40) for the "glass" footprint look
-c_bull_fill   = input.color(color.new(#00E676, 40), "Bullish Bubble Fill", group=group_vis)
-c_bull_zone   = input.color(color.new(#00E676, 85), "Bullish Zone Bg", group=group_vis)
-c_bull_border = input.color(#00E676, "Bullish Zone Border", group=group_vis)
-
-c_bear_fill   = input.color(color.new(#FF1744, 40), "Bearish Bubble Fill", group=group_vis)
-c_bear_zone   = input.color(color.new(#FF1744, 85), "Bearish Zone Bg", group=group_vis)
-c_bear_border = input.color(#FF1744, "Bearish Zone Border", group=group_vis)
+group_zones = "Liquidity Tracking"
+show_zones = input.bool(true, "Draw Unmitigated Zones", group=group_zones)
+zone_color_bull = input.color(color.new(#00ff88, 80), "Bullish Zone", group=group_zones)
+zone_color_bear = input.color(color.new(#ff0044, 80), "Bearish Zone", group=group_zones)
 
 // ========================================================================= //
-// 2. STATISTICAL & GEOMETRIC ENGINE
+// 2. STATISTICAL ENGINE (Z-SCORE)
 // ========================================================================= //
+// Properly normalized volume: (Value - Mean) / StDev
 vol_sma   = ta.sma(volume, lookback)
 vol_stdev = ta.stdev(volume, lookback)
 vol_z     = (volume - vol_sma) / vol_stdev
+
 is_anomaly = vol_z >= z_threshold
 
+// ========================================================================= //
+// 3. GEOMETRIC ABSORPTION LOGIC
+// ========================================================================= //
 mid_price  = (high + low) / 2
 top_body   = math.max(open, close)
 low_body   = math.min(open, close)
@@ -40,56 +38,45 @@ body_size  = top_body - low_body
 upper_wick = high - top_body
 lower_wick = low_body - low
 
+// Presets for NQ vs GC
+// NQ requires higher rejection wicks; GC often absorbs via tight spread churn
 bool valid_bull = false
 bool valid_bear = false
 
 if market_type == "NQ (Volatile)"
     valid_bull := is_anomaly and mid_price < low_body and lower_wick > (body_size * wick_mult)
     valid_bear := is_anomaly and mid_price > top_body and upper_wick > (body_size * wick_mult)
-else 
+else // GC (Liquid/Churn)
+    // Focus more on high volume with little price movement (churn)
     valid_bull := is_anomaly and close >= low_body and lower_wick > upper_wick
     valid_bear := is_anomaly and close <= top_body and upper_wick > lower_wick
 
 // ========================================================================= //
-// 3. EXACT PLACEMENT COORDINATES
+// 4. VISUALS & ZONE ENGINE
 // ========================================================================= //
-// Calculate the exact price level where the highest volume node likely sits
-// (40% into the rejection wick)
-bull_y = low + (lower_wick * 0.40)
-bear_y = high - (upper_wick * 0.40)
+// Signal Bubbles
+plotshape(valid_bull and show_bubbles, "Bullish Absorption", shape.circle, location.belowbar, color.new(color.green, 20), size=size.small)
+plotshape(valid_bear and show_bubbles, "Bearish Absorption", shape.circle, location.abovebar, color.new(color.red, 20), size=size.small)
 
-// ========================================================================= //
-// 4. PINNED VISUALS & ZONE ENGINE
-// ========================================================================= //
-
-// A. Pinned Order Flow Bubbles 
-// Using size.small (a required const string) and location.absolute
-plotshape(show_bubbles and valid_bull ? bull_y : na, "Bull Bubble", shape.circle, location.absolute, c_bull_fill, size=size.small, offset=0)
-plotshape(show_bubbles and valid_bear ? bear_y : na, "Bear Bubble", shape.circle, location.absolute, c_bear_fill, size=size.small, offset=0)
-
-// B. Institutional Zone Engine
+// Zone Management
 var box[] bull_boxes = array.new<box>()
 var box[] bear_boxes = array.new<box>()
 
 if show_zones
     if valid_bull
-        zone_top = low + (lower_wick * 0.5)
-        bx = box.new(bar_index, zone_top, bar_index, low, bgcolor=c_bull_zone, border_color=c_bull_border, border_style=line.style_dashed, extend=extend.right)
+        bx = box.new(bar_index, low + (lower_wick*0.5), bar_index, low, bgcolor=zone_color_bull, border_color=color.new(color.green, 50), extend=extend.right)
         array.push(bull_boxes, bx)
-        
     if valid_bear
-        zone_bot = high - (upper_wick * 0.5)
-        bx = box.new(bar_index, high, bar_index, zone_bot, bgcolor=c_bear_zone, border_color=c_bear_border, border_style=line.style_dashed, extend=extend.right)
+        bx = box.new(bar_index, high, bar_index, high - (upper_wick*0.5), bgcolor=zone_color_bear, border_color=color.new(color.red, 50), extend=extend.right)
         array.push(bear_boxes, bx)
 
-// Zone Mitigation Engine
+// Mitigation Logic: Close the box if price violates the zone
 if array.size(bull_boxes) > 0
     for i = array.size(bull_boxes) - 1 to 0
         b = array.get(bull_boxes, i)
         if close < box.get_bottom(b)
             box.set_extend(b, extend.none)
             box.set_right(b, bar_index)
-            box.set_border_color(b, color.new(color.gray, 50)) 
             array.remove(bull_boxes, i)
 
 if array.size(bear_boxes) > 0
@@ -98,5 +85,4 @@ if array.size(bear_boxes) > 0
         if close > box.get_top(b)
             box.set_extend(b, extend.none)
             box.set_right(b, bar_index)
-            box.set_border_color(b, color.new(color.gray, 50))
             array.remove(bear_boxes, i)
