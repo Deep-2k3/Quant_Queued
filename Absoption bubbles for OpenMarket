@@ -1,43 +1,55 @@
 //@lang=wrun-ts
-// NQ Sniper v2: Auto UTC-5 Session + Liquidity Sweep Filter + Smart SL Clamp + Zero-Warning Scorecard
+// NQ Sniper v12: Clean, Profitable Orderflow & Structural Reclaim Engine
+// Features full On/Off visual toggles, simplified 2-stage risk management, and zero clutter.
 
-// 1. SESSION & ADAPTIVE REGIME SETTINGS
-param.int("session_mode", 0, { min: 0, max: 5, label: "Session Mode (0=AUTO UTC-5, 1=Asia, 2=LDN, 3=NY AM, 4=Lunch, 5=Manual)" });
-param.bool("adaptive_regime", true, { label: "Adaptive Volatility Scaling (ATR Regime)" });
-param.int("utc_offset_hrs", -5, { min: -12, max: 14, label: "Exchange Timezone Offset (NY EST = -5)" });
+// 1. VISUAL DISPLAY TOGGLES (Turn any element On/Off instantly)
+param.bool("show_absorption_bubbles", true, { label: "Visuals: Show Absorption Circles (Minor/Major)" });
+param.bool("show_entry_exits", true, { label: "Visuals: Show Entry Triangles & Exit Markers" });
+param.bool("show_trade_lines", true, { label: "Visuals: Show Entry / SL / TP Lines on Chart" });
+param.bool("show_hud_table", true, { label: "Visuals: Show Top-Left HUD Scorecard & Status" });
 
-// 2. ANTI-CHOP LOCATION & EXECUTION ENGINE
-param.bool("require_sweep", true, { label: "Anti-Chop: Only Enter on Liquidity Sweep of Swing High/Low" });
-param.int("swing_lookback", 10, { min: 3, max: 60, label: "Liquidity Sweep Lookback Bars (Also Manual Delta Lookback)" });
-param.bool("clamp_sl_to_max", true, { label: "Cap Wide Wicks at Max SL (Instead of Skipping Trade)" });
-param.int("max_past_setups", 10, { min: 1, max: 15, label: "Number of Past Setups in Scorecard (1-15)" });
-param.bool("show_all_history_lines", true, { label: "Draw Entry/SL/TP Lines on Setups" });
+// 2. ORDERFLOW ABSORPTION & CLIMAX SETTINGS
+param.int("lookback", 20, { min: 5, max: 100, label: "Rolling Delta, Volume & ATR Lookback" });
+param.number("minor_mult", 1.6, { min: 1.0, max: 5.0, step: 0.1, label: "Minor Delta Multiple (1.6x Avg Delta)" });
+param.number("major_mult", 2.6, { min: 1.5, max: 8.0, step: 0.1, label: "Major Delta Multiple (2.6x Avg Delta)" });
+param.number("climax_vol_mult", 1.8, { min: 1.2, max: 5.0, step: 0.1, label: "Stopping-Volume Climax Multiple (1.8x Avg Vol)" });
+param.number("max_body_pct", 0.50, { min: 0.20, max: 0.80, step: 0.05, label: "Max Body-to-Range Ratio (Compression)" });
+param.number("min_close_pos", 0.55, { min: 0.45, max: 0.80, step: 0.05, label: "Min Close Rejection Position (0.55)" });
+
+// 3. STRUCTURAL SWEEP & GEX WALL FILTERS
+param.int("trade_session_filter", 0, { min: 0, max: 3, label: "Trade Filter (0=All 24h, 1=LDN+NY AM, 2=NY AM Only, 3=LDN Only)" });
+param.bool("filter_poc_chop", true, { label: "Anti-Chop: Block Entries Inside Rolling VWAP Fair-Value Zone" });
+param.number("fair_value_deadzone_atr", 0.65, { min: 0.2, max: 2.0, step: 0.05, label: "Fair-Value Dead-Zone Width (ATR Multiple)" });
+param.bool("require_swing_sweep", true, { label: "Entry Filter: Require 3-Bar Structural High/Low Sweep" });
+param.bool("use_gex_walls", false, { label: "Strict GEX Mode: Only Arm Setups Holding GEX Walls" });
+param.number("gex_put_wall", 27673.00, { step: 0.25, label: "GEX Put Wall (Support)" });
+param.number("gex_top_star", 27964.75, { step: 0.25, label: "GEX Top Star (Pivot)" });
+param.number("gex_call_wall", 28075.50, { step: 0.25, label: "GEX Call Wall (Resistance)" });
+param.number("gex_flip_level", 28220.50, { step: 0.25, label: "GEX Dealer-Flow Flip" });
+param.number("wall_tolerance_pts", 20.0, { min: 2.0, max: 50.0, step: 1.0, label: "GEX Wall Proximity Tolerance (Pts)" });
+
+// 4. SIMPLIFIED PROFITABLE RISK MANAGEMENT & TARGET ENGINE
 param.int("trigger_bars", 3, { min: 1, max: 6, label: "Max Bars to Reclaim Absorption Candle" });
-param.number("sl_buffer_pts", 2.5, { min: 0.5, max: 10.0, step: 0.25, label: "SL Buffer Behind Wick (Pts)" });
-param.number("max_sl_pts", 20.0, { min: 5.0, max: 50.0, step: 1.0, label: "Max Allowed Stop Loss (Pts)" });
+param.number("sl_buffer_pts", 2.5, { min: 0.5, max: 10.0, step: 0.25, label: "SL Buffer Behind Absorption Wick (Pts)" });
+param.number("min_sl_pts", 8.0, { min: 4.0, max: 20.0, step: 1.0, label: "Min Stop Loss Distance (Anti-Noise Floor)" });
+param.number("max_sl_pts", 25.0, { min: 10.0, max: 60.0, step: 1.0, label: "Max Stop Loss (Scales to 2.2x ATR)" });
 param.number("tp1_pts", 25.0, { min: 5.0, max: 100.0, step: 5.0, label: "TP1: Breakeven Trigger (Pts)" });
-param.number("tp2_pts", 60.0, { min: 10.0, max: 200.0, step: 5.0, label: "TP2: Lock +TP1 Trail Trigger (Pts)" });
-param.number("tp3_pts", 100.0, { min: 20.0, max: 300.0, step: 5.0, label: "TP3: Full GEX Runner Target (Pts)" });
-
-// 3. MANUAL ABSORPTION PARAMETERS (Used when session_mode == 5)
-param.number("minor_mult", 2.0, { min: 1.0, max: 10.0, step: 0.1, label: "Manual: Minor Delta Mult" });
-param.number("major_mult", 3.5, { min: 1.5, max: 15.0, step: 0.1, label: "Manual: Major Delta Mult" });
-param.number("max_body_pct", 0.50, { min: 0.10, max: 1.0, step: 0.05, label: "Manual: Max Body / Range" });
-param.number("min_range_pts", 2.5, { min: 0.25, max: 25.0, step: 0.25, label: "Manual: Min Bar Range (Pts)" });
-param.bool("require_wick_rejection", true, { label: "Require Wick Rejection (40%)" });
+param.number("tp2_pts", 60.0, { min: 10.0, max: 200.0, step: 5.0, label: "TP2: Core Scale Target (Pts)" });
+param.number("tp3_pts", 100.0, { min: 20.0, max: 300.0, step: 5.0, label: "TP3: Full Runner Target (Pts)" });
+param.int("max_past_setups", 8, { min: 1, max: 8, label: "Number of Past Setups in Scorecard (1-8)" });
 
 // INPUT FEEDS
 input("close", ohlcv.close);
 input("buy", trades.volume, { side: "BUY", missing: "zero" });
 input("sell", trades.volume, { side: "SELL", missing: "zero" });
 
-// ABSORPTION BUBBLES (Strictly Circles: Cyan/Green = Bullish, Orange/Red = Bearish)
-output("bull_minor", scatter, overlay, { color: "#00e5ff", width: 5, description: "Minor Bullish Bid Absorption" });
-output("bull_major", scatter, overlay, { color: "#00ff88", width: 9, description: "Major Bullish Bid Absorption" });
-output("bear_minor", scatter, overlay, { color: "#ff9100", width: 5, description: "Minor Bearish Ask Absorption" });
-output("bear_major", scatter, overlay, { color: "#ff1744", width: 9, description: "Major Bearish Ask Absorption" });
+// 1. ABSORPTION BUBBLES
+output("bull_minor", scatter, overlay, { color: "#00e5ff", width: 5, legend: false, description: "Minor Bullish Bid Absorption" });
+output("bull_major", scatter, overlay, { color: "#00ff88", width: 9, legend: false, description: "Major Bullish Bid Absorption" });
+output("bear_minor", scatter, overlay, { color: "#ff9100", width: 5, legend: false, description: "Minor Bearish Ask Absorption" });
+output("bear_major", scatter, overlay, { color: "#ff1744", width: 9, legend: false, description: "Major Bearish Ask Absorption" });
 
-// DISTINCT SHAPES FOR ENTRIES & EXITS
+// 2. DISTINCT SHAPES FOR ENTRIES & EXITS
 output("long_entry_y", none, overlay, { legend: false });
 output("short_entry_y", none, overlay, { legend: false });
 output("sl_exit_y", none, overlay, { legend: false });
@@ -50,151 +62,214 @@ render.shape("sl_exit_mark", { output: "sl_exit_y", shape: "cross", color: "#ff1
 render.shape("be_exit_mark", { output: "be_exit_y", shape: "diamond", color: "#00e5ff", width: 8 });
 render.shape("tp_exit_mark", { output: "tp_exit_y", shape: "flag", color: "#ffd600", width: 10 });
 
-// TRADE LEVEL LINES
-output("entry_line", line, overlay, { color: "#ffffff", width: 1, description: "Setup Entry Price" });
-output("sl_line", line, overlay, { color: "#ff1744", width: 2, description: "Setup Active Stop Loss (Steps to BE / TP1)" });
-output("tp1_line", line, overlay, { color: "#00e5ff", width: 1, description: "Setup TP1 (+25 pts -> Lock BE)" });
-output("tp2_line", line, overlay, { color: "#00e676", width: 1, description: "Setup TP2 (+60 pts -> Lock TP1)" });
-output("tp3_line", line, overlay, { color: "#ffd600", width: 2, description: "Setup TP3 (+100 pts GEX Runner)" });
+// 3. SETUP LEVEL LINES
+output("entry_line", line, overlay, { color: "#ffffff", width: 1, legend: false, description: "Setup Entry Price" });
+output("sl_line", line, overlay, { color: "#ff1744", width: 2, legend: false, description: "Setup Active Stop Loss" });
+output("tp1_line", line, overlay, { color: "#00e5ff", width: 1, legend: false, description: "Setup TP1 (+25p)" });
+output("tp2_line", line, overlay, { color: "#00e676", width: 1, legend: false, description: "Setup TP2 (+60p)" });
+output("tp3_line", line, overlay, { color: "#ffd600", width: 2, legend: false, description: "Setup TP3 (+100p)" });
 
-// ALERTS
+// 4. ALERTS
 const armed_alert = output("armed_alert", none, overlay, { legend: false });
 const entry_trigger_alert = output("entry_trigger_alert", none, overlay, { legend: false });
-alert("sweep_absorption_armed", { when: armed_alert, message: "Liquidity Sweep Absorption Armed on {{symbol}} at {{close}}" });
+alert("absorption_setup_armed", { when: armed_alert, message: "Absorption Setup Armed on {{symbol}} at {{close}}" });
 alert("reclaim_entry_triggered", { when: entry_trigger_alert, message: "Confirmed Absorption Reclaim Entry on {{symbol}} at {{close}}" });
 
-// COMPACT HUD CELLS
+// 5. UNCLUTTERED LEGEND READOUTS
 string("mode_cell", { max_bytes: 28 });
-string("ratio_cell", { max_bytes: 24 });
+string("ratio_cell", { max_bytes: 28 });
 string("score_cell", { max_bytes: 48 });
 string("status_cell", { max_bytes: 32 });
-legend({ title: "NQ Sniper v2" });
+legend({ title: "NQ Sniper v12" });
 render.legend("mode_readout", { text: "mode_cell" });
 render.legend("ratio_readout", { text: "ratio_cell" });
 render.legend("score_readout", { text: "score_cell" });
 render.legend("status_readout", { text: "status_cell" });
 
-// PRIMITIVE BIT-PACKED REGISTERS FOR LAST 15 SETUPS (Zero Arrays = Zero Warnings!)
-// histMask: 2 bits per setup (1=Loss, 2=BE/Trail Win, 3=Full TP3 Win)
-// histPtsPack: 10 bits per setup storing (signed_pts + 200) for up to 6 recent trades, plus cumulative netPts
+// PRIMITIVE BIT-PACKED SCORECARD REGISTERS
 let histMask: i64 = 0;
+let histPtsPack: i64 = 0;
 let histTotalCount: i32 = 0;
-let cumulativeNetPts: f64 = 0.0;
 
-// ROLLING VOLATILITY, SWING EXTREMES & DELTA BASELINES
-let fastDeltaSma = new Sma(15);
-let medDeltaSma = new Sma(25);
-let slowDeltaSma = new Sma(35);
-let customDeltaSma = new Sma(10);
-let fastRangeSma = new Sma(14);
-let baseRangeSma = new Sma(60);
-let swingHighMax = new RunningMax(10);
-let swingLowMin = new RunningMin(10);
+let deltaBaseSma = new Sma(20);
+let volBaseSma = new Sma(20);
+let shortAtrSma = new Sma(14);
+let pvSma = new Sma(50);
+let vSma = new Sma(50);
 
-// CONFIGURATION STATE
-let sessionMode: i32 = 0;
-let useAdaptive: bool = true;
-let utcOffsetMins: i32 = -300;
-let requireSweep: bool = true;
-let clampSl: bool = true;
-let maxPastSetups: i32 = 10;
-let showHistoryLines: bool = true;
+let minorMult: f64 = 1.6;
+let majorMult: f64 = 2.6;
+let climaxVolMult: f64 = 1.8;
+let maxBodyPct: f64 = 0.50;
+let minClosePos: f64 = 0.55;
 
-let manualMinor: f64 = 2.0;
-let manualMajor: f64 = 3.5;
-let manualBody: f64 = 0.50;
-let manualMinRange: f64 = 2.5;
-let requireWick: bool = true;
+let tradeSessFilter: i32 = 0;
+let filterPocChop: bool = true;
+let fvDeadzoneAtr: f64 = 0.65;
+let requireSwingSweep: bool = true;
+let useGexWalls: bool = false;
+let gexPutWall: f64 = 27673.00;
+let gexTopStar: f64 = 27964.75;
+let gexCallWall: f64 = 28075.50;
+let gexFlipLevel: f64 = 28220.50;
+let wallTolerance: f64 = 20.0;
 
 let triggerBarsMax: i32 = 3;
 let slBufferPts: f64 = 2.5;
-let maxSlPts: f64 = 20.0;
+let minSlPts: f64 = 8.0;
+let maxSlPts: f64 = 25.0;
 let tp1Pts: f64 = 25.0;
 let tp2Pts: f64 = 60.0;
 let tp3Pts: f64 = 100.0;
+let maxPastSetups: i32 = 8;
 
-// Armed & Active Trade State Machine
-let armedDir: i32 = 0;
-let armedCount: i32 = 0;
-let armedHigh: f64 = 0.0;
-let armedLow: f64 = 0.0;
+let showBubbles: bool = true;
+let showEntries: bool = true;
+let showLines: bool = true;
+let showHud: bool = true;
 
-let tradeDir: i32 = 0;
-let entryPrice: f64 = 0.0;
-let slPrice: f64 = 0.0;
-let tp1Price: f64 = 0.0;
-let tp2Price: f64 = 0.0;
-let tp3Price: f64 = 0.0;
-let beLocked: bool = false;
-let hitTp2: bool = false;
+// TICK-SAFE CACHE & STATE
+let lastBarTime: f64 = -1.0;
+let lockedAvgDelta: f64 = NaN;
+let lockedAvgVol: f64 = NaN;
+let lockedAtr: f64 = NaN;
+let lockedFairValue: f64 = NaN;
+
+let cachedAbsDelta: f64 = 0.0;
+let cachedTotalVol: f64 = 0.0;
+let cachedPv: f64 = 0.0;
+let cachedRange: f64 = 0.0;
+let cachedHigh: f64 = NaN;
+let cachedLow: f64 = NaN;
+
+let pH1: f64 = NaN; let pH2: f64 = NaN; let pH3: f64 = NaN;
+let pL1: f64 = NaN; let pL2: f64 = NaN; let pL3: f64 = NaN;
+
+let baseArmedDir: i32 = 0; let baseArmedCount: i32 = 0;
+let baseArmedHigh: f64 = 0.0; let baseArmedLow: f64 = 0.0; let baseArmedTrigger: f64 = 0.0;
+
+let baseTradeDir: i32 = 0; let baseEntryPrice: f64 = 0.0; let baseSlPrice: f64 = 0.0;
+let baseTp1Price: f64 = 0.0; let baseTp2Price: f64 = 0.0; let baseTp3Price: f64 = 0.0;
+let baseBeLocked: bool = false;
+let baseHistMask: i64 = 0; let baseHistPtsPack: i64 = 0; let baseHistCount: i32 = 0;
+
+let workArmedDir: i32 = 0; let workArmedCount: i32 = 0;
+let workArmedHigh: f64 = 0.0; let workArmedLow: f64 = 0.0; let workArmedTrigger: f64 = 0.0;
+
+let workTradeDir: i32 = 0; let workEntryPrice: f64 = 0.0; let workSlPrice: f64 = 0.0;
+let workTp1Price: f64 = 0.0; let workTp2Price: f64 = 0.0; let workTp3Price: f64 = 0.0;
+let workBeLocked: bool = false;
 
 let modeText = new TextBuilder(28);
-let ratioText = new TextBuilder(24);
+let ratioText = new TextBuilder(28);
 let scoreText = new TextBuilder(48);
 let statusText = new TextBuilder(32);
 
-function recordSetup(code: i64, pts: f64): void {
-  histMask = (histMask << 2) | (code & 3);
-  if (histTotalCount < 15) {
-    histTotalCount = histTotalCount + 1;
-  }
-  cumulativeNetPts = cumulativeNetPts + pts;
+function packOutcome(code: i64, pts: f64): void {
+  histMask = (baseHistMask << 2) | (code & 3);
+  let scaledPts = i64(Math.round(pts / 2.0)) + 128;
+  if (scaledPts < 0) scaledPts = 0;
+  else if (scaledPts > 255) scaledPts = 255;
+  histPtsPack = (baseHistPtsPack << 8) | (scaledPts & 255);
+  histTotalCount = baseHistCount < 8 ? baseHistCount + 1 : 8;
 }
 
-function getNyMinutesOfDay(timeValue: f64, offsetMins: i32): i32 {
-  const totalMins = timeValue > 100000000000.0
-    ? i64(Math.floor(timeValue / 60000.0))
-    : i64(Math.floor(timeValue / 60.0));
-  const shifted = totalMins + i64(offsetMins);
+function getNyEstMinutes(timeValue: f64): i32 {
+  const totalMins = timeValue > 100000000000.0 ? i64(Math.floor(timeValue / 60000.0)) : i64(Math.floor(timeValue / 60.0));
+  const shifted = totalMins - 300;
   let modMins = i32(shifted % 1440);
-  if (modMins < 0) {
-    modMins = modMins + 1440;
-  }
+  if (modMins < 0) modMins = modMins + 1440;
   return modMins;
 }
 
 function onStart(): void {
-  sessionMode = i32(p_session_mode());
-  useAdaptive = pb_adaptive_regime();
-  utcOffsetMins = i32(p_utc_offset_hrs()) * 60;
-  requireSweep = pb_require_sweep();
-  clampSl = pb_clamp_sl_to_max();
-  maxPastSetups = i32(p_max_past_setups());
-  showHistoryLines = pb_show_all_history_lines();
-  requireWick = pb_require_wick_rejection();
+  const lb = i32(p_lookback());
+  minorMult = p_minor_mult();
+  majorMult = p_major_mult();
+  climaxVolMult = p_climax_vol_mult();
+  maxBodyPct = p_max_body_pct();
+  minClosePos = p_min_close_pos();
+
+  tradeSessFilter = i32(p_trade_session_filter());
+  filterPocChop = pb_filter_poc_chop();
+  fvDeadzoneAtr = p_fair_value_deadzone_atr();
+  requireSwingSweep = pb_require_swing_sweep();
+  useGexWalls = pb_use_gex_walls();
+  gexPutWall = p_gex_put_wall();
+  gexTopStar = p_gex_top_star();
+  gexCallWall = p_gex_call_wall();
+  gexFlipLevel = p_gex_flip_level();
+  wallTolerance = p_wall_tolerance_pts();
 
   triggerBarsMax = i32(p_trigger_bars());
   slBufferPts = p_sl_buffer_pts();
+  minSlPts = p_min_sl_pts();
   maxSlPts = p_max_sl_pts();
   tp1Pts = p_tp1_pts();
   tp2Pts = p_tp2_pts();
   tp3Pts = p_tp3_pts();
+  maxPastSetups = i32(p_max_past_setups());
 
-  manualMinor = p_minor_mult();
-  manualMajor = p_major_mult();
-  manualBody = p_max_body_pct();
-  manualMinRange = p_min_range_pts();
+  showBubbles = pb_show_absorption_bubbles();
+  showEntries = pb_show_entry_exits();
+  showLines = pb_show_trade_lines();
+  showHud = pb_show_hud_table();
 
-  const swLen = i32(p_swing_lookback());
-  fastDeltaSma = new Sma(15);
-  medDeltaSma = new Sma(25);
-  slowDeltaSma = new Sma(35);
-  customDeltaSma = new Sma(swLen);
-  fastRangeSma = new Sma(14);
-  baseRangeSma = new Sma(60);
-  swingHighMax = new RunningMax(swLen);
-  swingLowMin = new RunningMin(swLen);
+  deltaBaseSma = new Sma(lb);
+  volBaseSma = new Sma(lb);
+  shortAtrSma = new Sma(14);
+  pvSma = new Sma(50);
+  vSma = new Sma(50);
 
-  armedDir = 0;
-  tradeDir = 0;
-  histMask = 0;
-  histTotalCount = 0;
-  cumulativeNetPts = 0.0;
+  lastBarTime = -1.0;
+  lockedAvgDelta = NaN; lockedAvgVol = NaN; lockedAtr = NaN; lockedFairValue = NaN;
+  cachedAbsDelta = 0.0; cachedTotalVol = 0.0; cachedPv = 0.0; cachedRange = 0.0; cachedHigh = NaN; cachedLow = NaN;
+  pH1 = NaN; pH2 = NaN; pH3 = NaN; pL1 = NaN; pL2 = NaN; pL3 = NaN;
+
+  baseArmedDir = 0; baseArmedCount = 0; baseArmedHigh = 0.0; baseArmedLow = 0.0; baseArmedTrigger = 0.0;
+  baseTradeDir = 0; baseEntryPrice = 0.0; baseSlPrice = 0.0; baseTp1Price = 0.0; baseTp2Price = 0.0; baseTp3Price = 0.0;
+  baseBeLocked = false; baseHistMask = 0; baseHistPtsPack = 0; baseHistCount = 0;
+
+  workArmedDir = 0; workArmedCount = 0; workArmedHigh = 0.0; workArmedLow = 0.0; workArmedTrigger = 0.0;
+  workTradeDir = 0; workEntryPrice = 0.0; workSlPrice = 0.0; workTp1Price = 0.0; workTp2Price = 0.0; workTp3Price = 0.0;
+  workBeLocked = false; histMask = 0; histPtsPack = 0; histTotalCount = 0;
 }
 
 function onBar(): void {
+  const curTime = f64(bar.time());
+
+  if (curTime != lastBarTime) {
+    if (lastBarTime > 0.0) {
+      lockedAvgDelta = deltaBaseSma.update(cachedAbsDelta);
+      lockedAvgVol = volBaseSma.update(cachedTotalVol);
+      lockedAtr = shortAtrSma.update(cachedRange);
+      const avgPv = pvSma.update(cachedPv);
+      const avgV = vSma.update(cachedTotalVol);
+      if (!isNaN(avgPv) && !isNaN(avgV) && avgV > 0.0) lockedFairValue = avgPv / avgV;
+
+      pH3 = pH2; pH2 = pH1; pH1 = cachedHigh;
+      pL3 = pL2; pL2 = pL1; pL1 = cachedLow;
+
+      baseArmedDir = workArmedDir; baseArmedCount = workArmedCount;
+      baseArmedHigh = workArmedHigh; baseArmedLow = workArmedLow; baseArmedTrigger = workArmedTrigger;
+      baseTradeDir = workTradeDir; baseEntryPrice = workEntryPrice; baseSlPrice = workSlPrice;
+      baseTp1Price = workTp1Price; baseTp2Price = workTp2Price; baseTp3Price = workTp3Price;
+      baseBeLocked = workBeLocked;
+      baseHistMask = histMask; baseHistPtsPack = histPtsPack; baseHistCount = histTotalCount;
+    }
+    lastBarTime = curTime;
+  }
+
+  workArmedDir = baseArmedDir; workArmedCount = baseArmedCount;
+  workArmedHigh = baseArmedHigh; workArmedLow = baseArmedLow; workArmedTrigger = baseArmedTrigger;
+  workTradeDir = baseTradeDir; workEntryPrice = baseEntryPrice; workSlPrice = baseSlPrice;
+  workTp1Price = baseTp1Price; workTp2Price = baseTp2Price; workTp3Price = baseTp3Price;
+  workBeLocked = baseBeLocked;
+  histMask = baseHistMask; histPtsPack = baseHistPtsPack; histTotalCount = baseHistCount;
+
   const buyVolume = in_buy();
   const sellVolume = in_sell();
+  const totalVol = buyVolume + sellVolume;
   const delta = buyVolume - sellVolume;
   const absDelta = Math.abs(delta);
 
@@ -203,142 +278,95 @@ function onBar(): void {
   const open = bar.open();
   const close = bar.close();
   const barRange = Math.max(high - low, 0.0001);
+
+  cachedAbsDelta = absDelta; cachedTotalVol = totalVol;
+  cachedPv = ((high + low + close) / 3.0) * totalVol;
+  cachedRange = barRange; cachedHigh = high; cachedLow = low;
+
   const bodyRatio = Math.abs(close - open) / barRange;
+  const bodyHigh = Math.max(open, close);
+  const bodyLow = Math.min(open, close);
+  const lowerWick = bodyLow - low;
+  const upperWick = high - bodyHigh;
 
-  const avgDeltaFast = fastDeltaSma.update(absDelta);
-  const avgDeltaMed = medDeltaSma.update(absDelta);
-  const avgDeltaSlow = slowDeltaSma.update(absDelta);
-  const avgDeltaCustom = customDeltaSma.update(absDelta);
-  const shortAtr = fastRangeSma.update(barRange);
-  const longAtr = baseRangeSma.update(barRange);
+  const avgDelta = !isNaN(lockedAvgDelta) ? lockedAvgDelta : absDelta;
+  const avgVol = !isNaN(lockedAvgVol) ? lockedAvgVol : totalVol;
+  const shortAtr = !isNaN(lockedAtr) ? lockedAtr : barRange;
 
-  // Rolling Structural Swing Extremes (Includes current bar so low == recentLow means a new N-bar low sweep)
-  const recentHigh = swingHighMax.update(high);
-  const recentLow = swingLowMin.update(low);
-  const tolerance = !isNaN(shortAtr) ? shortAtr * 0.25 : 1.5;
-  const sweptLow = !requireSweep || (!isNaN(recentLow) && low <= recentLow + tolerance);
-  const sweptHigh = !requireSweep || (!isNaN(recentHigh) && high >= recentHigh - tolerance);
-
-  // Determine Active Session (Auto UTC-5 NY EST or Manual Override)
-  let activeSessId: i32 = 2;
-  if (sessionMode == 0) {
-    const nyMins = getNyMinutesOfDay(f64(bar.time()), utcOffsetMins);
-    if (nyMins >= 120 && nyMins < 480) {
-      activeSessId = 2; // 02:00 - 08:00 EST: London
-    } else if (nyMins >= 480 && nyMins < 570) {
-      activeSessId = 3; // 08:00 - 09:30 EST: NY Pre-Market
-    } else if (nyMins >= 570 && nyMins < 690) {
-      activeSessId = 4; // 09:30 - 11:30 EST: NY AM Open
-    } else if (nyMins >= 690 && nyMins < 810) {
-      activeSessId = 5; // 11:30 - 13:30 EST: NY Lunch
-    } else if (nyMins >= 810 && nyMins < 1020) {
-      activeSessId = 6; // 13:30 - 17:00 EST: NY PM Close
-    } else {
-      activeSessId = 1; // 18:00 - 02:00 EST: Asia / Globex
-    }
-  } else if (sessionMode == 1) {
-    activeSessId = 1;
-  } else if (sessionMode == 2) {
-    activeSessId = 2;
-  } else if (sessionMode == 3) {
-    activeSessId = 4;
-  } else if (sessionMode == 4) {
-    activeSessId = 5;
-  } else {
-    activeSessId = 7;
-  }
-
-  let avgDelta = avgDeltaMed;
-  let minorMult = 1.8;
-  let majorMult = 3.0;
-  let maxBodyPct = 0.55;
-  let minRangePts = 2.5;
-
-  if (activeSessId == 1) {
-    avgDelta = avgDeltaSlow;
-    minorMult = 1.5;
-    majorMult = 2.5;
-    maxBodyPct = 0.60;
-    minRangePts = 1.5;
-  } else if (activeSessId == 2) {
-    avgDelta = avgDeltaMed;
-    minorMult = 1.8;
-    majorMult = 3.0;
-    maxBodyPct = 0.55;
-    minRangePts = 2.25;
-  } else if (activeSessId == 3) {
-    avgDelta = avgDeltaMed;
-    minorMult = 2.0;
-    majorMult = 3.3;
-    maxBodyPct = 0.50;
-    minRangePts = 3.0;
-  } else if (activeSessId == 4) {
-    avgDelta = avgDeltaFast;
-    minorMult = 2.4;
-    majorMult = 4.0;
-    maxBodyPct = 0.45;
-    minRangePts = 5.0;
-  } else if (activeSessId == 5) {
-    avgDelta = avgDeltaSlow;
-    minorMult = 2.2;
-    majorMult = 3.5;
-    maxBodyPct = 0.40;
-    minRangePts = 2.0;
-  } else if (activeSessId == 6) {
-    avgDelta = avgDeltaMed;
-    minorMult = 2.0;
-    majorMult = 3.2;
-    maxBodyPct = 0.50;
-    minRangePts = 3.0;
-  } else {
-    avgDelta = avgDeltaCustom;
-    minorMult = manualMinor;
-    majorMult = manualMajor;
-    maxBodyPct = manualBody;
-    minRangePts = manualMinRange;
-  }
-
-  // Adaptive Volatility Scaling
-  let volRegime: i32 = 0;
-  if (useAdaptive && !isNaN(shortAtr) && !isNaN(longAtr) && longAtr > 0.0) {
-    const atrRatio = shortAtr / longAtr;
-    const dynamicMinRange = shortAtr * 0.60;
-    if (dynamicMinRange > minRangePts) {
-      minRangePts = dynamicMinRange;
-    }
-    if (atrRatio >= 1.25) {
-      volRegime = 1;
-      minorMult = minorMult * 1.12;
-      majorMult = majorMult * 1.15;
-      maxBodyPct = Math.max(0.35, maxBodyPct - 0.05);
-    } else if (atrRatio <= 0.80) {
-      volRegime = -1;
-      minorMult = Math.max(1.3, minorMult * 0.90);
-      majorMult = Math.max(2.2, majorMult * 0.90);
-    }
-  }
-
-  const hasBaseline = !isNaN(avgDelta) && avgDelta > 0.0;
+  const minBarRange = Math.max(1.25, shortAtr * 0.35);
+  const hasBaseline = !isNaN(lockedAvgDelta) && lockedAvgDelta > 0.0 && !isNaN(lockedAvgVol) && lockedAvgVol > 0.0;
   const deltaRatio = hasBaseline ? absDelta / avgDelta : NaN;
+  const volRatio = hasBaseline ? totalVol / avgVol : NaN;
+  const rangeOk = barRange >= minBarRange;
 
-  const bullRejection = !requireWick || (close - low) / barRange >= 0.40;
-  const bearRejection = !requireWick || (high - close) / barRange >= 0.40;
-  const rangeOk = barRange >= minRangePts;
+  const compFactor = bodyRatio <= 0.30 ? 0.90 : 1.0;
+  const effMinorMult = minorMult * compFactor;
+  const effMajorMult = majorMult * compFactor;
 
-  const qualifies = hasBaseline && rangeOk && deltaRatio >= minorMult && bodyRatio <= maxBodyPct;
-  const bullAbsorption = qualifies && delta < 0.0 && bullRejection;
-  const bearAbsorption = qualifies && delta > 0.0 && bearRejection;
+  const bullWickValid = ((close - low) / barRange >= minClosePos) && (lowerWick > upperWick);
+  const bearWickValid = ((high - close) / barRange >= minClosePos) && (upperWick > lowerWick);
 
-  const bullMajor = bullAbsorption && deltaRatio >= majorMult;
-  const bearMajor = bearAbsorption && deltaRatio >= majorMult;
+  const bullAbsorption = hasBaseline && rangeOk && bodyRatio <= maxBodyPct && bullWickValid && (
+    (delta < 0.0 && deltaRatio >= effMinorMult) || (volRatio >= climaxVolMult && (lowerWick / barRange) >= 0.50)
+  );
+  const bearAbsorption = hasBaseline && rangeOk && bodyRatio <= maxBodyPct && bearWickValid && (
+    (delta > 0.0 && deltaRatio >= effMinorMult) || (volRatio >= climaxVolMult && (upperWick / barRange) >= 0.50)
+  );
+
+  const bullMajor = bullAbsorption && (deltaRatio >= effMajorMult || (volRatio >= climaxVolMult * 1.3));
+  const bearMajor = bearAbsorption && (deltaRatio >= effMajorMult || (volRatio >= climaxVolMult * 1.3));
   const bullMinor = bullAbsorption && !bullMajor;
   const bearMinor = bearAbsorption && !bearMajor;
 
-  // Plot All Absorption Bubbles for Orderflow Context
-  out_bull_minor(bullMinor ? low : NaN);
-  out_bull_major(bullMajor ? low : NaN);
-  out_bear_minor(bearMinor ? high : NaN);
-  out_bear_major(bearMajor ? high : NaN);
+  // Render absorption bubbles only if showBubbles is true
+  out_bull_minor(showBubbles && bullMinor ? low : NaN);
+  out_bull_major(showBubbles && bullMajor ? low : NaN);
+  out_bear_minor(showBubbles && bearMinor ? high : NaN);
+  out_bear_major(showBubbles && bearMajor ? high : NaN);
+
+  let minPrev3Low = pL1;
+  if (!isNaN(pL2) && pL2 < minPrev3Low) minPrev3Low = pL2;
+  if (!isNaN(pL3) && pL3 < minPrev3Low) minPrev3Low = pL3;
+
+  let maxPrev3High = pH1;
+  if (!isNaN(pH2) && pH2 > maxPrev3High) maxPrev3High = pH2;
+  if (!isNaN(pH3) && pH3 > maxPrev3High) maxPrev3High = pH3;
+
+  const sweepTol = shortAtr * 0.15;
+  const bullSweepPass = !requireSwingSweep || isNaN(minPrev3Low) || low <= minPrev3Low + sweepTol;
+  const bearSweepPass = !requireSwingSweep || isNaN(maxPrev3High) || high >= maxPrev3High - sweepTol;
+
+  const pierceAllowance = wallTolerance * 0.35;
+  const bullWallPass = !useGexWalls || (
+    Math.abs(low - gexPutWall) <= wallTolerance && close >= gexPutWall - pierceAllowance ||
+    Math.abs(low - gexTopStar) <= wallTolerance && close >= gexTopStar - pierceAllowance ||
+    Math.abs(low - gexFlipLevel) <= wallTolerance && close >= gexFlipLevel - pierceAllowance
+  );
+  const bearWallPass = !useGexWalls || (
+    Math.abs(high - gexCallWall) <= wallTolerance && close <= gexCallWall + pierceAllowance ||
+    Math.abs(high - gexTopStar) <= wallTolerance && close <= gexTopStar + pierceAllowance ||
+    Math.abs(high - gexFlipLevel) <= wallTolerance && close <= gexFlipLevel + pierceAllowance
+  );
+
+  const deadzonePts = shortAtr * fvDeadzoneAtr;
+  const bullOutsidePoc = !filterPocChop || bullWallPass || isNaN(lockedFairValue) || (low <= lockedFairValue - deadzonePts);
+  const bearOutsidePoc = !filterPocChop || bearWallPass || isNaN(lockedFairValue) || (high >= lockedFairValue + deadzonePts);
+
+  const nyMins = getNyEstMinutes(curTime);
+  let clockSessId: i32 = 1;
+  if (nyMins >= 120 && nyMins < 570) clockSessId = 2;
+  else if (nyMins >= 570 && nyMins < 690) clockSessId = 3;
+  else if (nyMins >= 690 && nyMins < 810) clockSessId = 4;
+  else if (nyMins >= 810 && nyMins < 1020) clockSessId = 5;
+
+  let sessionTradeAllowed = true;
+  if (tradeSessFilter == 1) sessionTradeAllowed = (clockSessId == 2 || clockSessId == 3);
+  else if (tradeSessFilter == 2) sessionTradeAllowed = (clockSessId == 3);
+  else if (tradeSessFilter == 3) sessionTradeAllowed = (clockSessId == 2);
+
+  const dynSlBuffer = Math.max(slBufferPts, shortAtr * 0.20);
+  const effectiveMinSl = Math.max(minSlPts, shortAtr * 0.75);
+  const effectiveMaxSl = Math.max(maxSlPts, shortAtr * 2.2);
 
   let firedEntryLong = false;
   let firedEntryShort = false;
@@ -347,236 +375,191 @@ function onBar(): void {
   let firedTpHit = false;
   let exitMarkerPrice = NaN;
 
-  // 1. Evaluate Active Trade Exit, TP1->BE Shift, TP2->TP1 Trail, & Opposite Major Defense
-  if (tradeDir == 1) {
-    if (low <= slPrice) {
-      exitMarkerPrice = slPrice;
-      if (beLocked) {
+  // Active Trade Management (Simplified Profitable 2-Stage Engine)
+  if (workTradeDir == 1) {
+    if (low <= workSlPrice) {
+      exitMarkerPrice = workSlPrice;
+      const realizedPts = workSlPrice - workEntryPrice;
+      if (workBeLocked) {
         firedBeHit = true;
-        recordSetup(2, slPrice - entryPrice > tp1Pts * 0.5 ? tp1Pts : 2.0);
+        packOutcome(2, realizedPts > 0.0 ? realizedPts : 2.0);
       } else {
         firedSlHit = true;
-        recordSetup(1, -(entryPrice - slPrice));
+        packOutcome(1, realizedPts);
       }
-      tradeDir = 0;
-    } else if (high >= tp3Price) {
-      exitMarkerPrice = tp3Price;
+      workTradeDir = 0;
+    } else if (high >= workTp3Price) {
+      exitMarkerPrice = workTp3Price;
       firedTpHit = true;
-      recordSetup(3, tp3Pts);
-      tradeDir = 0;
+      packOutcome(3, tp3Pts);
+      workTradeDir = 0;
     } else {
-      // Step SL to TP1 (+25 pts) once TP2 (+60 pts) is reached
-      if (!hitTp2 && high >= tp2Price) {
-        hitTp2 = true;
-        slPrice = tp1Price;
-        beLocked = true;
-      } else if (!beLocked && high >= tp1Price) {
-        slPrice = entryPrice + 2.0;
-        beLocked = true;
-      }
-      // If an opposite Major Bearish Absorption prints while in profit above TP1, tighten SL to bar low
-      if (beLocked && bearMajor && low - slBufferPts > slPrice) {
-        slPrice = low - slBufferPts;
+      if (!workBeLocked && high >= workTp1Price) {
+        workSlPrice = workEntryPrice + 2.0; // Clean Breakeven + 2 pts
+        workBeLocked = true;
       }
     }
-  } else if (tradeDir == -1) {
-    if (high >= slPrice) {
-      exitMarkerPrice = slPrice;
-      if (beLocked) {
+  } else if (workTradeDir == -1) {
+    if (high >= workSlPrice) {
+      exitMarkerPrice = workSlPrice;
+      const realizedPts = workEntryPrice - workSlPrice;
+      if (workBeLocked) {
         firedBeHit = true;
-        recordSetup(2, entryPrice - slPrice > tp1Pts * 0.5 ? tp1Pts : 2.0);
+        packOutcome(2, realizedPts > 0.0 ? realizedPts : 2.0);
       } else {
         firedSlHit = true;
-        recordSetup(1, -(slPrice - entryPrice));
+        packOutcome(1, realizedPts);
       }
-      tradeDir = 0;
-    } else if (low <= tp3Price) {
-      exitMarkerPrice = tp3Price;
+      workTradeDir = 0;
+    } else if (low <= workTp3Price) {
+      exitMarkerPrice = workTp3Price;
       firedTpHit = true;
-      recordSetup(3, tp3Pts);
-      tradeDir = 0;
+      packOutcome(3, tp3Pts);
+      workTradeDir = 0;
     } else {
-      // Step SL to TP1 (+25 pts) once TP2 (+60 pts) is reached
-      if (!hitTp2 && low <= tp2Price) {
-        hitTp2 = true;
-        slPrice = tp1Price;
-        beLocked = true;
-      } else if (!beLocked && low <= tp1Price) {
-        slPrice = entryPrice - 2.0;
-        beLocked = true;
-      }
-      // If an opposite Major Bullish Absorption prints while in profit below TP1, tighten SL to bar high
-      if (beLocked && bullMajor && high + slBufferPts < slPrice) {
-        slPrice = high + slBufferPts;
+      if (!workBeLocked && low <= workTp1Price) {
+        workSlPrice = workEntryPrice - 2.0;
+        workBeLocked = true;
       }
     }
   }
 
-  // 2. Evaluate Armed Setup for Reclaim Entry (With Smart 20pt SL Clamp)
+  // Armed Reclaim Entry Evaluation
   const exitedThisBar = firedSlHit || firedBeHit || firedTpHit;
-  if (!exitedThisBar && tradeDir == 0 && armedDir != 0) {
-    armedCount = armedCount + 1;
-    if (armedDir == 1 && close > armedHigh && delta > 0.0) {
-      let proposedSl = armedLow - slBufferPts;
-      let riskPts = close - proposedSl;
-      if (clampSl && riskPts > maxSlPts) {
-        proposedSl = close - maxSlPts;
-        riskPts = maxSlPts;
+  if (!exitedThisBar && workTradeDir == 0 && workArmedDir != 0 && sessionTradeAllowed) {
+    workArmedCount = workArmedCount + 1;
+    const longMomentumOk = delta > 0.0 || (close > workArmedHigh && close > open);
+    const shortMomentumOk = delta < 0.0 || (close < workArmedLow && close < open);
+
+    if (workArmedDir == 1 && close > workArmedTrigger && longMomentumOk) {
+      let trueSl = workArmedLow - dynSlBuffer;
+      let riskPts = close - trueSl;
+      if (riskPts < effectiveMinSl) {
+        trueSl = close - effectiveMinSl;
+        riskPts = effectiveMinSl;
       }
-      if (riskPts > 0.0 && riskPts <= maxSlPts) {
-        tradeDir = 1;
-        entryPrice = close;
-        slPrice = proposedSl;
-        tp1Price = entryPrice + tp1Pts;
-        tp2Price = entryPrice + tp2Pts;
-        tp3Price = entryPrice + tp3Pts;
-        beLocked = false;
-        hitTp2 = false;
-        armedDir = 0;
+      if (riskPts > 0.0 && riskPts <= effectiveMaxSl) {
+        workTradeDir = 1;
+        workEntryPrice = close;
+        workSlPrice = trueSl;
+        workTp1Price = workEntryPrice + tp1Pts;
+        workTp2Price = workEntryPrice + tp2Pts;
+        workTp3Price = workEntryPrice + tp3Pts;
+        workBeLocked = false;
+        workArmedDir = 0;
         firedEntryLong = true;
       }
-    } else if (armedDir == -1 && close < armedLow && delta < 0.0) {
-      let proposedSl = armedHigh + slBufferPts;
-      let riskPts = proposedSl - close;
-      if (clampSl && riskPts > maxSlPts) {
-        proposedSl = close + maxSlPts;
-        riskPts = maxSlPts;
+    } else if (workArmedDir == -1 && close < workArmedTrigger && shortMomentumOk) {
+      let trueSl = workArmedHigh + dynSlBuffer;
+      let riskPts = trueSl - close;
+      if (riskPts < effectiveMinSl) {
+        trueSl = close + effectiveMinSl;
+        riskPts = effectiveMinSl;
       }
-      if (riskPts > 0.0 && riskPts <= maxSlPts) {
-        tradeDir = -1;
-        entryPrice = close;
-        slPrice = proposedSl;
-        tp1Price = entryPrice - tp1Pts;
-        tp2Price = entryPrice - tp2Pts;
-        tp3Price = entryPrice - tp3Pts;
-        beLocked = false;
-        hitTp2 = false;
-        armedDir = 0;
+      if (riskPts > 0.0 && riskPts <= effectiveMaxSl) {
+        workTradeDir = -1;
+        workEntryPrice = close;
+        workSlPrice = trueSl;
+        workTp1Price = workEntryPrice - tp1Pts;
+        workTp2Price = workEntryPrice - tp2Pts;
+        workTp3Price = workEntryPrice - tp3Pts;
+        workBeLocked = false;
+        workArmedDir = 0;
         firedEntryShort = true;
       }
     }
-    if (armedCount >= triggerBarsMax) {
-      armedDir = 0;
-    }
+    if (workArmedCount >= triggerBarsMax) workArmedDir = 0;
   }
 
-  // 3. Arm New Setup ONLY When Absorption Occurs at a Liquidity Sweep (Anti-Chop Filter)
+  // Arm New Setup When Flat
   let newlyArmed = false;
-  if (bullAbsorption && sweptLow) {
-    armedDir = 1;
-    armedCount = 0;
-    armedHigh = high;
-    armedLow = low;
-    newlyArmed = true;
-  } else if (bearAbsorption && sweptHigh) {
-    armedDir = -1;
-    armedCount = 0;
-    armedHigh = high;
-    armedLow = low;
-    newlyArmed = true;
+  if (!exitedThisBar && workTradeDir == 0 && sessionTradeAllowed) {
+    if (bullAbsorption && bullSweepPass && bullWallPass && bullOutsidePoc) {
+      if (workArmedDir != 1 || low <= workArmedLow) {
+        workArmedDir = 1; workArmedCount = 0; workArmedHigh = high; workArmedLow = low; workArmedTrigger = bodyHigh;
+        newlyArmed = true;
+      }
+    } else if (bearAbsorption && bearSweepPass && bearWallPass && bearOutsidePoc) {
+      if (workArmedDir != -1 || high >= workArmedHigh) {
+        workArmedDir = -1; workArmedCount = 0; workArmedHigh = high; workArmedLow = low; workArmedTrigger = bodyLow;
+        newlyArmed = true;
+      }
+    }
+  } else if (!sessionTradeAllowed) {
+    workArmedDir = 0;
   }
 
-  // Plot Distinct Entry & Exit Shapes
-  out_long_entry_y(firedEntryLong ? low - 3.0 : NaN);
-  out_short_entry_y(firedEntryShort ? high + 3.0 : NaN);
-  out_sl_exit_y(firedSlHit ? exitMarkerPrice : NaN);
-  out_be_exit_y(firedBeHit ? exitMarkerPrice : NaN);
-  out_tp_exit_y(firedTpHit ? exitMarkerPrice : NaN);
+  // Render entry/exit shapes and lines only if toggled ON
+  out_long_entry_y(showEntries && firedEntryLong ? low - 3.0 : NaN);
+  out_short_entry_y(showEntries && firedEntryShort ? high + 3.0 : NaN);
+  out_sl_exit_y(showEntries && firedSlHit ? exitMarkerPrice : NaN);
+  out_be_exit_y(showEntries && firedBeHit ? exitMarkerPrice : NaN);
+  out_tp_exit_y(showEntries && firedTpHit ? exitMarkerPrice : NaN);
 
-  const drawLines = showHistoryLines && tradeDir != 0;
-  out_entry_line(drawLines ? entryPrice : NaN);
-  out_sl_line(drawLines ? slPrice : NaN);
-  out_tp1_line(drawLines ? tp1Price : NaN);
-  out_tp2_line(drawLines ? tp2Price : NaN);
-  out_tp3_line(drawLines ? tp3Price : NaN);
+  const drawLines = showLines && workTradeDir != 0;
+  out_entry_line(drawLines ? workEntryPrice : NaN);
+  out_sl_line(drawLines ? workSlPrice : NaN);
+  out_tp1_line(drawLines ? workTp1Price : NaN);
+  out_tp2_line(drawLines ? workTp2Price : NaN);
+  out_tp3_line(drawLines ? workTp3Price : NaN);
 
   out_armed_alert(newlyArmed ? 1.0 : 0.0);
   out_entry_trigger_alert((firedEntryLong || firedEntryShort) ? 1.0 : 0.0);
 
-  // HUD 1: Auto Session + Volatility Regime Badge
+  // HUD and Status (Rendered only if showHud is true)
   modeText.clear();
-  if (activeSessId == 1) {
-    modeText.text("[ASIA");
-  } else if (activeSessId == 2) {
-    modeText.text("[LDN");
-  } else if (activeSessId == 3) {
-    modeText.text("[NY PRE");
-  } else if (activeSessId == 4) {
-    modeText.text("[NY AM");
-  } else if (activeSessId == 5) {
-    modeText.text("[LUNCH");
-  } else if (activeSessId == 6) {
-    modeText.text("[NY PM");
+  if (showHud) {
+    if (clockSessId == 1) modeText.text("[ASIA ");
+    else if (clockSessId == 2) modeText.text("[LDN ");
+    else if (clockSessId == 3) modeText.text("[NY AM ");
+    else if (clockSessId == 4) modeText.text("[LUNCH ");
+    else modeText.text("[NY PM ");
+    if (!isNaN(lockedAtr)) modeText.text("ATR ").f64(lockedAtr, 1).text("p]");
+    else modeText.text("ATR --]");
   } else {
-    modeText.text("[MANUAL");
-  }
-  if (volRegime == 1) {
-    modeText.text(" • HIGH VOL]");
-  } else if (volRegime == -1) {
-    modeText.text(" • LOW VOL]");
-  } else {
-    modeText.text(" • NORM]");
+    modeText.text("");
   }
   str_mode_cell_tb(modeText);
 
-  // HUD 2: Live Delta Ratio vs Current Adaptive Hurdle
   ratioText.clear();
-  if (hasBaseline) {
-    ratioText.text("R ").f64(deltaRatio, 1).text("x / ").f64(minorMult, 1).text("x");
-  } else {
-    ratioText.text("R --");
-  }
+  if (showHud && hasBaseline) ratioText.text("D ").f64(deltaRatio, 1).text("x • V ").f64(volRatio, 1).text("x");
+  else ratioText.text("");
   str_ratio_cell_tb(ratioText);
 
-  // HUD 3: Rolling Scorecard + Cumulative Net Points
   const count = histTotalCount < maxPastSetups ? histTotalCount : maxPastSetups;
-  let wins: i32 = 0;
-  let beWins: i32 = 0;
-  let losses: i32 = 0;
+  let wins: i32 = 0; let beWins: i32 = 0; let losses: i32 = 0; let rollingPts: f64 = 0.0;
   for (let i: i32 = 0; i < count; i++) {
-    const shift = i64(i * 2);
-    const code = i32((histMask >> shift) & 3);
-    if (code == 3) {
-      wins = wins + 1;
-    } else if (code == 2) {
-      beWins = beWins + 1;
-    } else if (code == 1) {
-      losses = losses + 1;
-    }
+    const shift2 = i64(i * 2);
+    const code = i32((histMask >> shift2) & 3);
+    if (code == 3) wins = wins + 1;
+    else if (code == 2) beWins = beWins + 1;
+    else if (code == 1) losses = losses + 1;
+
+    const shift8 = i64(i * 8);
+    const rawByte = i32((histPtsPack >> shift8) & 255);
+    rollingPts = rollingPts + (f64(rawByte - 128) * 2.0);
   }
 
   scoreText.clear();
-  scoreText.text("Last ").f64(f64(count), 0).text(": ")
-    .f64(f64(wins), 0).text("W ")
-    .f64(f64(beWins), 0).text("BE ")
-    .f64(f64(losses), 0).text("L (Net ")
-    .f64(cumulativeNetPts, 0).text("p)");
+  if (showHud) {
+    scoreText.text("Last ").f64(f64(count), 0).text(": ").f64(f64(wins), 0).text("W ").f64(f64(beWins), 0).text("BE ").f64(f64(losses), 0).text("L (").f64(rollingPts, 0).text("p)");
+  } else {
+    scoreText.text("");
+  }
   str_score_cell_tb(scoreText);
 
-  // HUD 4: Live Setup Status
   statusText.clear();
-  if (!hasBaseline) {
-    statusText.text("WARMUP");
-  } else if (firedSlHit) {
-    statusText.text("SL HIT (-1R)");
-  } else if (firedBeHit) {
-    statusText.text("TRAIL / BE HIT");
-  } else if (firedTpHit) {
-    statusText.text("TP3 HIT (+100p)");
-  } else if (firedEntryLong) {
-    statusText.text("LONG ENTRY");
-  } else if (firedEntryShort) {
-    statusText.text("SHORT ENTRY");
-  } else if (tradeDir == 1) {
-    statusText.text(hitTp2 ? "IN LONG (TP1 LOCK)" : (beLocked ? "IN LONG (BE LOCK)" : "IN LONG"));
-  } else if (tradeDir == -1) {
-    statusText.text(hitTp2 ? "IN SHORT (TP1 LOCK)" : (beLocked ? "IN SHORT (BE LOCK)" : "IN SHORT"));
-  } else if (armedDir == 1) {
-    statusText.text("SWEEP ARMED LONG");
-  } else if (armedDir == -1) {
-    statusText.text("SWEEP ARMED SHORT");
+  if (showHud) {
+    if (!hasBaseline) statusText.text("WARMUP");
+    else if (!sessionTradeAllowed && workTradeDir == 0) statusText.text("PAUSED (OFF-SESSION)");
+    else if (firedSlHit) statusText.text("SL HIT (-1R)");
+    else if (firedBeHit) statusText.text("BE STOP HIT");
+    else if (firedTpHit) statusText.text("TP3 RUNNER HIT");
+    else if (workTradeDir == 1) statusText.text(workBeLocked ? "IN LONG (BE+2)" : "IN LONG");
+    else if (workTradeDir == -1) statusText.text(workBeLocked ? "IN SHORT (BE+2)" : "IN SHORT");
+    else statusText.text("SCANNING");
   } else {
-    statusText.text("SCANNING");
+    statusText.text("");
   }
   str_status_cell_tb(statusText);
 }
