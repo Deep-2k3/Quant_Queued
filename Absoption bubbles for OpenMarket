@@ -36,18 +36,18 @@ output("bull_major", scatter, overlay, { color: "#00ff88", width: 9, description
 output("bear_minor", scatter, overlay, { color: "#ff9100", width: 5, description: "Minor Bearish Ask Absorption" });
 output("bear_major", scatter, overlay, { color: "#ff1744", width: 9, description: "Major Bearish Ask Absorption" });
 
-// DISTINCT SHAPES FOR ENTRIES & EXITS (Triangles & Crosses — NOT Circles!)
-const long_entry_y = output("long_entry_y", none, overlay, { legend: false });
-const short_entry_y = output("short_entry_y", none, overlay, { legend: false });
-const sl_exit_y = output("sl_exit_y", none, overlay, { legend: false });
-const be_exit_y = output("be_exit_y", none, overlay, { legend: false });
-const tp_exit_y = output("tp_exit_y", none, overlay, { legend: false });
+// DISTINCT SHAPES FOR ENTRIES & EXITS (Triangles, Crosses, Diamonds, Flags — String Literal Output Names!)
+output("long_entry_y", none, overlay, { legend: false });
+output("short_entry_y", none, overlay, { legend: false });
+output("sl_exit_y", none, overlay, { legend: false });
+output("be_exit_y", none, overlay, { legend: false });
+output("tp_exit_y", none, overlay, { legend: false });
 
-render.shape("long_entry_mark", { output: long_entry_y, shape: "triangle_up", color: "#00e676", width: 9 });
-render.shape("short_entry_mark", { output: short_entry_y, shape: "triangle_down", color: "#d500f9", width: 9 });
-render.shape("sl_exit_mark", { output: sl_exit_y, shape: "cross", color: "#ff1744", width: 8 });
-render.shape("be_exit_mark", { output: be_exit_y, shape: "diamond", color: "#00e5ff", width: 8 });
-render.shape("tp_exit_mark", { output: tp_exit_y, shape: "flag", color: "#ffd600", width: 10 });
+render.shape("long_entry_mark", { output: "long_entry_y", shape: "triangle_up", color: "#00e676", width: 9 });
+render.shape("short_entry_mark", { output: "short_entry_y", shape: "triangle_down", color: "#d500f9", width: 9 });
+render.shape("sl_exit_mark", { output: "sl_exit_y", shape: "cross", color: "#ff1744", width: 8 });
+render.shape("be_exit_mark", { output: "be_exit_y", shape: "diamond", color: "#00e5ff", width: 8 });
+render.shape("tp_exit_mark", { output: "tp_exit_y", shape: "flag", color: "#ffd600", width: 10 });
 
 // TRADE LEVEL LINES (Broken by NaN on exit bars so setups stay separate)
 output("entry_line", line, overlay, { color: "#ffffff", width: 1, description: "Setup Entry Price" });
@@ -79,7 +79,6 @@ render.legend("score_readout", { text: "score_cell" });
 render.legend("status_readout", { text: "status_cell" });
 
 // PRIMITIVE BITMASK REGISTER FOR LAST N SETUPS (Zero StaticArrays = Zero Warnings!)
-// Each setup uses 2 bits in histMask: 1 = Loss (-1R), 2 = BE/TP1 Win, 3 = Full TP3 Win
 let histMask: i64 = 0;
 let histTotalCount: i32 = 0;
 let avgPtsPerTrade = new Sma(10);
@@ -495,7 +494,7 @@ function onBar(): void {
   }
   str_ratio_cell_tb(ratioText);
 
-  // HUD 3: Rolling Scorecard Decoded From Primitive Bitmask (Zero Arrays!)
+  // HUD 3: Rolling Scorecard Decoded From Primitive Bitmask
   const count = histTotalCount < maxPastSetups ? histTotalCount : maxPastSetups;
   let wins: i32 = 0;
   let beWins: i32 = 0;
